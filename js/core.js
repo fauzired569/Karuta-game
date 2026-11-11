@@ -35,7 +35,9 @@ export function buildPool(books = [], chapters = []) {
   return KANJI.filter(
     (k) =>
       (bookSet.size === 0 || bookSet.has(k.book)) &&
-      (chapterSet.size === 0 || chapterSet.has(k.chapter))
+      (chapterSet.size === 0 ||
+        chapterSet.has(k.chapter) ||                    // plain
+        chapterSet.has(`${k.book}::${k.chapter}`))      // prefixed (dari UI)
   );
 }
 
@@ -64,11 +66,11 @@ export function randFloat(min, max) {
 /**
  * Parameter bot untuk satu ronde.
  * skill        : peluang benar 0,55–0,9
- * reactionTime : 700–2200 ms
+ * reactionTime : 20000–25000 ms (≥ 20 detik)
  */
 export function rollBotParams() {
   return {
-    skill: randFloat(0.55, 0.9),
-    reactionTime: randInt(700, 2200),
+    skill: randFloat(0.55, 0.9),          // tetap
+    reactionTime: randInt(20000, 25000),  // diperlambat: minimal 20 detik
   };
 }

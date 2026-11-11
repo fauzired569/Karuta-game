@@ -190,7 +190,6 @@ function renderField(cardIds) {
     btn.style.animationDelay = (i * 18) + 'ms';
     btn.innerHTML = `
       <span class="kanji">${escHtml(card.kanji)}</span>
-      <span class="reading">${escHtml(card.reading)}</span>
     `;
     fieldEl.appendChild(btn);
   });

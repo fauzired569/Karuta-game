@@ -126,7 +126,6 @@ function renderField(fieldEl, cardIds) {
     btn.style.animationDelay = (i * 18) + 'ms';
     btn.innerHTML = `
       <span class="kanji">${card.kanji}</span>
-      <span class="reading">${card.reading}</span>
     `;
     fieldEl.appendChild(btn);
   });
@@ -177,7 +176,8 @@ async function hostCreateRoom(selectedIds) {
         name: 'Wasit (Host)',
         score: 0,
         isHost: true,
-        online: true
+        online: true,
+        joinedAt: serverTimestamp()
       }
     },
     settings: { pool: selectedIds }
