@@ -1,0 +1,61 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "rooms": {
+      "$code": {
+        ".write": "auth != null && !data.exists()",
+
+        "meta": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
+          "hostUid":   { ".write": "auth != null && !data.exists()" },
+          "createdAt": { ".write": "auth != null && !data.exists()" },
+          "fieldSize": { ".write": "auth != null && !data.exists()" },
+          "status": {
+            ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()"
+          },
+          "startedAt": {
+            ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()"
+          }
+        },
+
+        "settings": {
+          ".read": "auth != null",
+          ".write": "auth != null && !data.exists()"
+        },
+
+        "players": {
+          ".read": "auth != null",
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid && !data.exists() && newData.hasChildren(['name','score','isHost','online','joinedAt']) && newData.child('score').val() === 0 && (newData.child('isHost').val() === false || (newData.child('isHost').val() === true && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()))",
+            "name":   { ".write": "auth != null && auth.uid === $uid" },
+            "online": { ".write": "auth != null && auth.uid === $uid" },
+            "score": {
+              ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()"
+            }
+          }
+        },
+
+        "currentRound": {
+          ".read": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
+          ".write": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
+          "targetId": {
+            ".read": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()"
+          },
+          "targetMeaning": { ".read": "auth != null" },
+          "cards":         { ".read": "auth != null" },
+          "number":        { ".read": "auth != null" },
+          "remaining":     { ".read": "auth != null" },
+          "startedAt":     { ".read": "auth != null" },
+          "processed":     { ".read": "auth != null" },
+          "expired":       { ".read": "auth != null" },
+          "winner": {
+            ".read": "auth != null",
+            ".write": "auth != null && ((newData.hasChildren(['uid','cardId']) && newData.child('uid').val() === auth.uid && newData.child('cardId').val() === root.child('rooms').child($code).child('currentRound').child('targetId').val() && !data.exists()) || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val())"
+          }
+        }
+      }
+    }
+  }
+}
