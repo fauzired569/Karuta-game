@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kanji Karuta</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ============ MODE SELECTOR ============ -->
+  <section id="screen-mode" class="screen">
+    <div class="wrap">
+      <a href="index.html" class="back-link">← Kembali</a>
+      <h1 class="title">漢字かるた<small>KANJI KARUTA</small></h1>
+      <p class="subtitle">Pilih mode bermain.</p>
+
+      <div class="mode-grid">
+        <button class="mode-btn" data-mode="solo" type="button">
+          <span class="mode-icon">🎴</span>
+          <span class="mode-label">Solo</span>
+          <span class="mode-desc">1 pemain vs 3 bot</span>
+        </button>
+        <button class="mode-btn" data-mode="multi" type="button">
+          <span class="mode-icon">👥</span>
+          <span class="mode-label">Multiplayer</span>
+          <span class="mode-desc">Gabung room wasit</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MULTI JOIN ============ -->
+  <section id="screen-multi-join" class="screen">
+    <div class="wrap">
+      <a href="#" data-back class="back-link">← Kembali</a>
+      <h1 class="title">Gabung Room<small>MULTIPLAYER</small></h1>
+      <p class="subtitle">Masukkan kode 4 huruf dari wasit.</p>
+
+      <div class="join-form">
+        <label>
+          Kode Room
+          <input id="joinCode" type="text" inputmode="text" maxlength="4"
+                 placeholder="ABCD" autocapitalize="characters" autocomplete="off">
+        </label>
+        <label>
+          Nama Kamu
+          <input id="joinName" type="text" maxlength="16"
+                 placeholder="Nama tampilan" autocomplete="off">
+        </label>
+        <button class="btn primary" id="btnJoin" type="button">Gabung ▸</button>
+        <div class="join-error" id="joinError"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MULTI LOBBY ============ -->
+  <section id="screen-multi-lobby" class="screen">
+    <div class="wrap">
+      <h1 class="title">Lobby<small>MENUNGGU WASIT</small></h1>
+      <p class="subtitle">Room: <strong id="lobbyCode">----</strong></p>
+
+      <div class="lobby-info">
+        <h3>Pemain (<span id="lobbyCount">0</span>)</h3>
+        <ul class="lobby-list" id="lobbyPlayers"></ul>
+        <p class="hint">Wasit akan memulai saat semua siap.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SOLO SETUP ============ -->
+  <section id="screen-setup" class="screen">
+    <div class="wrap">
+      <a href="index.html" class="back-link">← Kembali</a>
+      <h1 class="title">漢字かるた<small>KANJI KARUTA · SOLO</small></h1>
+      <p class="subtitle">Pilih buku &amp; bab, lalu mulai bermain melawan 3 bot.</p>
+
+      <div id="bookList"></div>
+
+      <div class="actions">
+        <button class="btn" id="btnAll" type="button">Pilih Semua</button>
+        <button class="btn" id="btnNone" type="button">Kosongkan</button>
+        <div class="pool-info" id="poolInfo">0 kanji</div>
+        <button class="btn primary" id="btnStart" type="button" disabled>Mulai ▸</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ GAME (shared: solo & multi) ============ -->
+  <section id="screen-game" class="screen">
+    <div class="hud">
+      <div class="referee">
+        <div class="tag">読み札<br>WASIT</div>
+        <div class="meaning" id="meaning">…</div>
+        <div class="tag" id="remainTag" style="background:#6b4a2a;">SISA<br>–</div>
+      </div>
+      <div class="scores" id="scores"></div>
+    </div>
+    <div class="field" id="field"></div>
+  </section>
+
+  <!-- ============ RESULT ============ -->
+  <section id="screen-result" class="screen">
+    <div class="result-card">
+      <h2 class="result-title">結果発表</h2>
+      <p class="result-sub">Peringkat akhir</p>
+      <div id="resultList"></div>
+      <div class="result-actions">
+        <button class="btn primary" id="btnAgain" type="button">Main Lagi</button>
+        <button class="btn" id="btnChange" type="button">Ganti Bab</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script type="module" src="js/boot.js"></script>
+</body>
+</html>
