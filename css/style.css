@@ -467,3 +467,23 @@ button{font-family:inherit; cursor:pointer; border:none;}
 }
 
 .hint{color:#d4b88a; font-size:.82rem; margin:8px 0 0; opacity:.85;}
+
+/* =========================================================
+   SCROLL untuk layar non-game (host, join, lobby, mode, result)
+   ========================================================= */
+#screen-mode,
+#screen-multi-join,
+#screen-multi-lobby,
+#screen-host-setup,
+#screen-host-lobby {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 22px 14px 44px;
+}
+
+#screen-host-result {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 26px 16px 40px;
+  align-items: center;
+}
