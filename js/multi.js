@@ -258,7 +258,6 @@ async function hostStartGame() {
 
   showScreen('screen-host-game');
 
-  // Cleanup listener lama
   if (hostState.unsubRound) {
     hostState.unsubRound();
     hostState.unsubRound = null;
@@ -304,7 +303,6 @@ async function hostStartGame() {
     hostReadyForNextPick();
   });
 
-  // Tampilkan picker untuk ronde pertama
   hostReadyForNextPick();
 }
 
@@ -336,7 +334,6 @@ function renderKanjiPicker() {
 }
 
 function hostReadyForNextPick() {
-  // Reset HUD
   renderPrompt(document.getElementById('hostMeaning'), '', 'Pilih kanji di bawah…');
   const remainEl = document.getElementById('hostRemainTag');
   if (remainEl) remainEl.innerHTML = `SISA<br>${hostState.pool.length - hostState.used.size}`;
@@ -346,7 +343,6 @@ function hostReadyForNextPick() {
   const statusEl = document.getElementById('hostStatus');
   if (statusEl) statusEl.textContent = 'Pilih kanji untuk jadi soal…';
 
-  // Pool habis? → selesai
   if (hostState.pool.every(id => hostState.used.has(id))) {
     finishHostGame();
   }
@@ -372,19 +368,18 @@ async function hostPickKanji(cardId) {
   const distract  = shuffle(others).slice(0, Math.max(0, fieldSize - 1));
   const cards     = shuffle([cardId, ...distract]);
 
-  // Update HUD host (sinkron sebelum await)
+  // Update HUD host (sync)
   renderPrompt(document.getElementById('hostMeaning'), targetReading, targetMeaning);
   const remainEl = document.getElementById('hostRemainTag');
   if (remainEl) remainEl.innerHTML = `SISA<br>${hostState.pool.length - hostState.used.size}`;
 
-  // Bersihkan picker (sync, cegah double-click)
+  // Kosongkan picker segera (cegah double-click)
   const pickerEl = document.getElementById('kanjiPicker');
   if (pickerEl) pickerEl.innerHTML = '';
 
   const statusEl = document.getElementById('hostStatus');
   if (statusEl) statusEl.textContent = 'Menunggu pemain klik...';
 
-  // Tulis ronde
   try {
     await set(ref(db, `rooms/${code}/currentRound`), {
       number: hostState.roundNumber,
@@ -400,14 +395,12 @@ async function hostPickKanji(cardId) {
   } catch (err) {
     console.error('Gagal menulis soal:', err);
     toast('Gagal menulis soal', 'bad');
-    // Kembalikan state supaya host bisa coba lagi
     hostState.used.delete(cardId);
     hostState.roundNumber--;
     hostReadyForNextPick();
     return;
   }
 
-  // Timeout
   hostState.roundTimer = setTimeout(async () => {
     const res = await runTransaction(ref(db, `rooms/${code}/currentRound`), (cur) => {
       if (!cur || cur.winner || cur.expired) return;
@@ -542,7 +535,8 @@ let playerState = {
   unsubRoundNumber: null,
   unsubRoundWinner: null,
   unsubHostOnline: null,
-  hostUid: null
+  hostUid: null,
+  _roundToken: 0
 };
 
 async function playerJoinRoom(code, playerName) {
@@ -702,6 +696,7 @@ function cleanupPlayerGameListeners() {
   playerState.unsubPlayers?.();
   playerState.unsubPlayers = null;
   playerState.currentRound = null;
+  playerState._roundToken = 0;
 }
 
 function playerWatchMeta(onStart, onFinish, onLobby, onDisbanded) {
@@ -737,7 +732,7 @@ function playerBeginGame() {
   showScreen('screen-game');
   cleanupPlayerGameListeners();
 
-  // Placeholder sebelum soal pertama datang
+  // Reset UI ke placeholder
   const meaningEl = document.getElementById('meaning');
   if (meaningEl) {
     meaningEl.innerHTML = `
@@ -750,19 +745,36 @@ function playerBeginGame() {
   const remainEl = document.getElementById('remainTag');
   if (remainEl) remainEl.innerHTML = `SISA<br>–`;
 
+  // Event delegation — pasang SEKALI di #field, tidak pernah lepas walau DOM diganti
+  if (fieldEl && fieldEl.dataset.delegated !== '1') {
+    fieldEl.dataset.delegated = '1';
+    fieldEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('.card');
+      if (!btn) return;
+      onCardClick(btn.dataset.id, btn);
+    });
+  }
+
   // Skor live
   playerState.unsubPlayers = onValue(ref(db, `rooms/${code}/players`), (snap) => {
     const players = snap.val() || {};
     renderScores(document.getElementById('scores'), players, myUid);
   });
 
-  // Watcher nomor ronde → fetch per-field secara defensif
+  // Watcher nomor ronde → fetch dengan token & pending state
   playerState.unsubRoundNumber = onValue(ref(db, `rooms/${code}/currentRound/number`), async (snap) => {
     const number = snap.val();
     if (!number) return;
-    if (playerState.currentRound && playerState.currentRound.number === number) return;
+    if (playerState.currentRound?.number === number && !playerState.currentRound?.pending) return;
 
-    // Defensive: tiap field opsional, jangan sampai satu get gagal merusak render
+    const token = ++playerState._roundToken;
+
+    // Kunci klik selama fetch (pending, winner='pending' → truthy)
+    playerState.currentRound = {
+      number, cards: [], winner: 'pending',
+      targetMeaning: '…', targetReading: '', pending: true
+    };
+
     const [cardsSnap, remainingSnap, winnerSnap, meaningSnap, readingSnap] = await Promise.all([
       get(ref(db, `rooms/${code}/currentRound/cards`)).catch(() => null),
       get(ref(db, `rooms/${code}/currentRound/remaining`)).catch(() => null),
@@ -771,28 +783,33 @@ function playerBeginGame() {
       get(ref(db, `rooms/${code}/currentRound/targetReading`)).catch(() => null)
     ]);
 
+    // Tolak kalau ada fetch lebih baru (out-of-order)
+    if (token !== playerState._roundToken) return;
+
     const data = {
       number,
       cards: cardsSnap?.val() || [],
       remaining: remainingSnap?.val() || 0,
       winner: winnerSnap?.val() || null,
       targetMeaning: meaningSnap?.val() || '?',
-      targetReading: readingSnap?.val() || ''
+      targetReading: readingSnap?.val() || '',
+      pending: false
     };
     playerState.currentRound = data;
     renderRound(data);
     if (data.winner) onRoundWon(data);
   });
 
-  // Watcher winner
+  // Winner watcher — abaikan jika pending / sudah ada winner
   playerState.unsubRoundWinner = onValue(ref(db, `rooms/${code}/currentRound/winner`), (snap) => {
     const winner = snap.val();
     if (!winner) return;
-    if (!playerState.currentRound) return;
-    if (playerState.currentRound.winner) return;
+    const cur = playerState.currentRound;
+    if (!cur || cur.pending) return;
+    if (cur.winner) return;
 
-    playerState.currentRound.winner = winner;
-    onRoundWon({ ...playerState.currentRound, winner });
+    cur.winner = winner;
+    onRoundWon({ ...cur, winner });
   });
 
   // Host online watcher
@@ -843,10 +860,7 @@ function renderRound(round) {
   }
 
   renderField(document.getElementById('field'), round.cards);
-
-  document.querySelectorAll('#field .card').forEach(el => {
-    el.addEventListener('click', () => onCardClick(el.dataset.id, el));
-  });
+  // Listener klik sudah dipasang via delegation di #field — tidak perlu per-kartu.
 }
 
 function onRoundWon(round) {
@@ -868,9 +882,12 @@ function onRoundWon(round) {
 
 async function onCardClick(cardId, btnEl) {
   const round = playerState.currentRound;
-  if (!round || round.winner) return;
-  if (round.cards && !round.cards.includes(cardId)) return;
+  if (!round || round.pending) return;
+  if (round.winner) return;
+  if (!Array.isArray(round.cards) || !round.cards.includes(cardId)) return;
+  if (round._claiming) return;
 
+  round._claiming = true;
   try {
     const res = await runTransaction(
       ref(db, `rooms/${playerState.code}/currentRound/winner`),
@@ -889,6 +906,8 @@ async function onCardClick(cardId, btnEl) {
   } catch (err) {
     btnEl.classList.add('wrong');
     setTimeout(() => btnEl.classList.remove('wrong'), 500);
+  } finally {
+    round._claiming = false;
   }
 }
 
@@ -1219,7 +1238,7 @@ export function initHost() {
     }
   });
 
-  // ----- Picker kanji (host memilih soal) -----
+  // Picker kanji (host memilih soal) — event delegation
   document.getElementById('kanjiPicker')?.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-pick]');
     if (!btn || btn.disabled) return;
