@@ -158,7 +158,7 @@ button{font-family:inherit; cursor:pointer; border:none;}
 /* =========================================================
    LAYAR GAME
    ========================================================= */
-#screen-game{background:#400c0c;}
+#screen-game{background:#400c0c; min-height:0;}
 
 .hud{
   background:linear-gradient(180deg,var(--cream),var(--cream-2));
@@ -300,22 +300,33 @@ button{font-family:inherit; cursor:pointer; border:none;}
   100%{transform:scale(.55) rotate(4deg); opacity:0;}
 }
 
-/* ---------- Kanji picker (host) ---------- */
+/* ---------- Kanji picker (host) — scrollable & rapat ---------- */
 .kanji-picker{
-  flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
-  padding:12px;
-  display:grid;
-  grid-template-columns:repeat(auto-fill, minmax(84px, 1fr));
-  gap:8px; align-content:start;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 55vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 10px 12px 120px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 6px;
+  align-content: start;
+  scrollbar-width: thin;
 }
+.kanji-picker::-webkit-scrollbar{width:8px;}
+.kanji-picker::-webkit-scrollbar-thumb{background:rgba(201,162,39,.5); border-radius:4px;}
+.kanji-picker::-webkit-scrollbar-track{background:rgba(0,0,0,.1);}
 
 .kanji-pick-btn{
   display:flex; flex-direction:column; align-items:center; justify-content:center;
-  gap:2px; padding:8px 6px; min-height:70px;
+  gap:2px; padding:6px 4px; min-height:62px;
   border:2px solid var(--red); border-radius:8px;
   background:linear-gradient(180deg, #fffdf7 0%, #f7ecd6 100%);
   color:var(--ink); font-family:inherit; cursor:pointer;
-  box-shadow:0 3px 0 rgba(90,18,18,.3);
+  box-shadow:0 2px 0 rgba(90,18,18,.3);
   transition:transform .08s, box-shadow .08s, border-color .15s;
 }
 .kanji-pick-btn:hover{border-color:var(--red-soft);}
@@ -323,15 +334,15 @@ button{font-family:inherit; cursor:pointer; border:none;}
 .kanji-pick-btn:disabled{opacity:.4; cursor:not-allowed;}
 
 .kanji-pick-btn .kp-kanji{
-  font-size:1.4rem; font-weight:900; line-height:1;
+  font-size:1.3rem; font-weight:900; line-height:1;
 }
 .kanji-pick-btn .kp-reading{
-  font-size:.62rem; color:#8a6a3a; font-weight:700;
+  font-size:.58rem; color:#8a6a3a; font-weight:700;
   line-height:1.1; max-width:100%;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 .kanji-pick-btn .kp-meaning{
-  font-size:.6rem; color:#6b4a2a; text-align:center;
+  font-size:.56rem; color:#6b4a2a; text-align:center;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   max-width:100%; line-height:1.1;
 }
