@@ -148,7 +148,7 @@ let hostState = {
   unsubMeta: null
 };
 
-async function hostCreateRoom(selectedIds) {
+async function hostCreateRoom(selectedIds, maxPlayers = 8) {
   await signIn();
   myUid = auth.currentUser.uid;
 
@@ -169,7 +169,8 @@ async function hostCreateRoom(selectedIds) {
       status: 'lobby',
       hostUid: myUid,
       createdAt: serverTimestamp(),
-      fieldSize: FIELD_SIZE
+      fieldSize: FIELD_SIZE,
+      maxPlayers: Math.max(2, Math.min(15, Number(maxPlayers) || 8))
     },
     players: {
       [myUid]: {
@@ -388,6 +389,36 @@ async function hostPlayAgain() {
   showScreen('screen-host-lobby');
 }
 
+async function hostDisbandRoom() {
+  const code = hostState.code;
+  if (!code) return;
+
+  clearHostState();
+
+  try {
+    await remove(ref(db, `rooms/${code}`));
+  } catch (err) {
+    console.error('Disband gagal:', err);
+    throw new Error('Gagal membubarkan room: ' + (err.message || 'unknown'));
+  }
+
+  hostState.code = null;
+  hostState.uid  = null;
+  hostState.pool = [];
+
+  const poolSection = document.getElementById('poolSection');
+  if (poolSection) poolSection.hidden = false;
+  const roomInfo = document.getElementById('roomInfo');
+  if (roomInfo) roomInfo.hidden = true;
+  const btnCreate = document.getElementById('btnCreateRoom');
+  if (btnCreate) {
+    btnCreate.disabled = false;
+    btnCreate.textContent = 'Buat Room ▸';
+  }
+
+  showScreen('screen-host-setup');
+}
+
 // =========================================================
 // =========================================================
 // PLAYER
@@ -429,7 +460,8 @@ async function playerJoinRoom(code, playerName) {
 
   const players = playersSnap.val() || {};
   const count = Object.keys(players).length;
-  if (count >= MAX_PLAYERS) throw new Error(`Room penuh (maks ${MAX_PLAYERS} pemain).`);
+  const roomMax = Math.max(2, Math.min(15, Number(meta.maxPlayers) || MAX_PLAYERS));
+  if (count >= roomMax) throw new Error(`Room penuh (maks ${roomMax} pemain).`);
 
   await set(ref(db, `rooms/${code}/players/${myUid}`), {
     name: playerName,
@@ -479,7 +511,7 @@ function cleanupPlayerGameListeners() {
 // =========================================================
 // FIX #3: saat status kembali ke lobby, bersihkan listener game
 // =========================================================
-function playerWatchMeta(onStart, onFinish, onLobby) {
+function playerWatchMeta(onStart, onFinish, onLobby, onDisbanded) {
   const code = playerState.code;
   if (playerState.unsubMeta) {
     playerState.unsubMeta();
@@ -487,12 +519,20 @@ function playerWatchMeta(onStart, onFinish, onLobby) {
   }
   playerState.unsubMeta = onValue(ref(db, `rooms/${code}/meta`), (snap) => {
     const meta = snap.val();
-    if (!meta) return;
+
+    if (!meta) {
+      if (playerState.unsubMeta) { playerState.unsubMeta(); playerState.unsubMeta = null; }
+      if (playerState.unsubLobby) { playerState.unsubLobby(); playerState.unsubLobby = null; }
+      cleanupPlayerGameListeners();
+      onDisbanded?.();
+      return;
+    }
+
     if (meta.status === 'playing') onStart();
     else if (meta.status === 'finished') onFinish();
     else if (meta.status === 'lobby') {
-      cleanupPlayerGameListeners();   // bersihkan listener game
-      onLobby?.();                    // handler di initPlayer akan re-subscribe lobby
+      cleanupPlayerGameListeners();
+      onLobby?.();
     }
   });
 }
@@ -726,6 +766,16 @@ export function initPlayer(opts = {}) {
           showScreen('screen-multi-lobby');
           // Re-subscribe lobby karena listener game sudah di-cleanup
           playerWatchLobby(lobbyUpdateCallback);
+        },
+        () => {
+          toast('Room telah dibubarkan oleh wasit', 'bad');
+          playerState.code = null;
+          playerState.name = null;
+          playerState.hostUid = null;
+          playerState.currentRound = null;
+          const codeInput2 = document.getElementById('joinCode');
+          if (codeInput2) codeInput2.value = '';
+          showScreen('screen-multi-join');
         }
       );
     } catch (err) {
@@ -761,6 +811,8 @@ export function initHost() {
   const btnCreate   = $('btnCreateRoom');
   const btnStart    = $('btnStartGame');
   const btnAgain    = $('btnPlayAgain');
+  const maxPlayersInput  = $('maxPlayersInput');
+  const hostMaxPlayersEl = $('hostMaxPlayers');
 
   // ----- Build book/chapter selector -----
   const selectedBooks    = new Set();
@@ -858,9 +910,12 @@ export function initHost() {
     try {
       const pool = buildPool([...selectedBooks], [...selectedChapters]);
       const ids = pool.map(k => k.id);
-      const code = await hostCreateRoom(ids);
+      const rawMax = parseInt(maxPlayersInput?.value, 10);
+      const maxP = Number.isFinite(rawMax) ? Math.max(2, Math.min(15, rawMax)) : 8;
+      const code = await hostCreateRoom(ids, maxP);
 
       $('roomCode').textContent = code;
+      if (hostMaxPlayersEl) hostMaxPlayersEl.textContent = maxP;
       $('roomInfo').hidden = false;
       $('hostRoomCode').textContent = code;
       $('poolSection').hidden = true;
@@ -929,5 +984,22 @@ export function initHost() {
     } catch (err) {
       toast(err.message || 'Gagal reset', 'bad');
     }
+  });
+
+  // ----- Disband room (lobby & result) -----
+  document.querySelectorAll('[data-disband]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!hostState.code) return;
+      if (!confirm('Bubarkan room ini? Semua pemain akan dikeluarkan.')) return;
+      btn.disabled = true;
+      try {
+        await hostDisbandRoom();
+        toast('Room dibubarkan', 'good');
+      } catch (err) {
+        toast(err.message || 'Gagal membubarkan', 'bad');
+      } finally {
+        btn.disabled = false;
+      }
+    });
   });
 }
