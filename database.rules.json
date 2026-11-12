@@ -32,9 +32,9 @@
         "players": {
           ".read": "auth != null",
           "$uid": {
-            ".write": "auth != null && auth.uid === $uid && !data.exists() && newData.hasChildren(['name','score','isHost','online','joinedAt']) && newData.child('score').val() === 0 && (newData.child('isHost').val() === false || (newData.child('isHost').val() === true && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()))",
+            ".write": "auth != null && ((auth.uid === $uid && !data.exists() && newData.hasChildren(['name','score','isHost','online','joinedAt']) && newData.child('score').val() === 0 && (newData.child('isHost').val() === false || (newData.child('isHost').val() === true && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()))) || (!newData.exists() && (auth.uid === $uid || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val())))",
             "name":   { ".write": "auth != null && auth.uid === $uid" },
-            "online": { ".write": "auth != null && auth.uid === $uid" },
+            "online": { ".write": "auth != null && auth.uid === $uid && root.child('rooms').child($code).child('players').child($uid).exists()" },
             "score": {
               ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()"
             }
