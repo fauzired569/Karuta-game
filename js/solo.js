@@ -233,11 +233,14 @@ function nextRound() {
   const round = { targetId, cards, done: false };
   state.round = round;
 
-  // Update meaning
+  // Update prompt: hiragana (atas) + arti (bawah) — konsisten dengan multiplayer
   const target = KANJI.find(k => k.id === targetId);
   const meaningEl = document.getElementById('meaning');
   if (meaningEl) {
-    meaningEl.textContent = target ? target.meaning : '?';
+    meaningEl.innerHTML = `
+      <span class="prompt-reading">${escHtml(target?.reading || '')}</span>
+      <span class="prompt-meaning">${escHtml(target?.meaning || '?')}</span>
+    `;
     meaningEl.classList.remove('pop');
     void meaningEl.offsetWidth;
     meaningEl.classList.add('pop');
@@ -397,4 +400,5 @@ function wireControls() {
   updatePoolInfo();
   resetPlayers();
   wireControls();
+})();
 })();
