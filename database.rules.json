@@ -44,7 +44,9 @@
         "currentRound": {
           ".read": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
           ".write": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
-          "targetId": { ".read": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()" },
+          "targetId": {
+            ".read": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()"
+          },
           "targetMeaning": { ".read": "auth != null" },
           "cards":         { ".read": "auth != null" },
           "number":        { ".read": "auth != null" },
