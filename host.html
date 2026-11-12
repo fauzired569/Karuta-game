@@ -22,6 +22,11 @@
 
       <div id="poolSection">
         <div id="bookList"></div>
+        <div class="max-players-config">
+          <label for="maxPlayersInput">Maksimal Pemain (2–15)</label>
+          <input type="number" id="maxPlayersInput" min="2" max="15"
+                 value="8" inputmode="numeric">
+        </div>
         <div class="actions">
           <button class="btn" id="btnAll" type="button">Pilih Semua</button>
           <button class="btn" id="btnNone" type="button">Kosongkan</button>
@@ -46,12 +51,13 @@
       <p class="subtitle">Room: <strong id="hostRoomCode">----</strong></p>
 
       <div class="lobby-info">
-        <h3>Pemain (<span id="hostPlayerCount">0</span> / 8)</h3>
+        <h3>Pemain (<span id="hostPlayerCount">0</span> / <span id="hostMaxPlayers">8</span>)</h3>
         <ul class="lobby-list" id="hostPlayerList"></ul>
         <p class="hint">Butuh minimal 2 pemain untuk memulai.</p>
       </div>
 
       <div class="actions" style="justify-content:center;">
+        <button class="btn" id="btnDisbandRoom" type="button" data-disband>Bubarkan Room</button>
         <button class="btn primary" id="btnStartGame" type="button" disabled>Mulai ▸</button>
       </div>
     </div>
@@ -78,6 +84,7 @@
       <div id="hostResultList"></div>
       <div class="result-actions">
         <button class="btn primary" id="btnPlayAgain" type="button">Main Lagi</button>
+        <button class="btn" type="button" data-disband>Bubarkan</button>
         <a href="index.html" class="btn">Selesai</a>
       </div>
     </div>
