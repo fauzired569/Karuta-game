@@ -482,6 +482,45 @@ button{font-family:inherit; cursor:pointer; border:none;}
 .lobby-list .dot{width:8px; height:8px; border-radius:50%; background:var(--green); flex:0 0 auto;}
 .lobby-list .dot.offline{background:#999;}
 
+/* Nama & status pemain di lobby host */
+.lobby-list .pname{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.lobby-list .pstate{margin-left:auto; font-size:.75rem; color:#9b8460; font-weight:700;}
+
+/* Tombol tendang (host lobby) */
+.kick-btn{
+  flex:0 0 auto;
+  padding:4px 10px;
+  font-size:.72rem;
+  font-weight:800;
+  border-radius:8px;
+  background:#ffe9e9;
+  color:#8c1f1f;
+  border:2px solid #e0a3a3;
+  box-shadow:0 2px 0 rgba(0,0,0,.15);
+}
+.kick-btn:active{transform:translateY(2px); box-shadow:none;}
+.kick-btn:disabled{opacity:.5; cursor:not-allowed;}
+
+/* Tombol keluar room (player, lobby) */
+.leave-room-wrap{display:flex; justify-content:center; margin-top:16px;}
+
+/* Tombol keluar FAB (player, saat game) */
+.btn-leave-fab{
+  position:fixed;
+  bottom:18px;
+  right:18px;
+  z-index:30;
+  padding:8px 14px;
+  font-size:.78rem;
+  font-weight:800;
+  border-radius:999px;
+  background:rgba(20,6,6,.82);
+  color:#f0d9a8;
+  border:2px solid rgba(201,162,39,.55);
+  box-shadow:0 4px 12px rgba(0,0,0,.4);
+}
+.btn-leave-fab:active{transform:translateY(2px);}
+
 /* Room code display */
 .room-info{
   background:var(--cream); border-radius:14px; border:3px solid var(--red-dark);
