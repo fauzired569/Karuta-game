@@ -8,6 +8,7 @@
 export const firebaseConfig = {
   apiKey: "AIzaSyCD1wxxQuAf0p5oKEpqQMXhrWQSPTL8U4c",
   authDomain: "karuta-game-84e15.firebaseapp.com",
+  databaseURL: "https://karuta-game-84e15-default-rtdb.asia-southeast1.firebasedatabase.app", // <--- TAMBAHKAN INI
   projectId: "karuta-game-84e15",
   storageBucket: "karuta-game-84e15.firebasestorage.app",
   messagingSenderId: "121379125530",
