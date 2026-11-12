@@ -4,7 +4,7 @@
     ".write": false,
     "rooms": {
       "$code": {
-        ".write": "auth != null && !data.exists()",
+        ".write": "auth != null && (!data.exists() || (!newData.exists() && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()))",
 
         "meta": {
           ".read": "auth != null",
@@ -12,6 +12,10 @@
           "hostUid":   { ".write": "auth != null && !data.exists()" },
           "createdAt": { ".write": "auth != null && !data.exists()" },
           "fieldSize": { ".write": "auth != null && !data.exists()" },
+          "maxPlayers": {
+            ".write": "auth != null && !data.exists()",
+            ".validate": "newData.isNumber() && newData.val() >= 2 && newData.val() <= 15"
+          },
           "status": {
             ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()"
           },
@@ -40,9 +44,7 @@
         "currentRound": {
           ".read": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
           ".write": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
-          "targetId": {
-            ".read": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()"
-          },
+          "targetId": { ".read": "auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()" },
           "targetMeaning": { ".read": "auth != null" },
           "cards":         { ".read": "auth != null" },
           "number":        { ".read": "auth != null" },
