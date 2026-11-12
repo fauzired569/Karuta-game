@@ -93,6 +93,20 @@ function showScreen(id) {
 }
 
 // =========================================================
+// Prompt rendering (arti + hiragana) — shared host & player
+// =========================================================
+function renderPrompt(el, reading, meaning) {
+  if (!el) return;
+  el.innerHTML = `
+    <span class="prompt-reading">${escHtml(reading || '')}</span>
+    <span class="prompt-meaning">${escHtml(meaning || '?')}</span>
+  `;
+  el.classList.remove('pop');
+  void el.offsetWidth;
+  el.classList.add('pop');
+}
+
+// =========================================================
 // Score rendering (shared host & player)
 // =========================================================
 function renderScores(el, players, myUidArg) {
@@ -152,7 +166,6 @@ async function hostCreateRoom(selectedIds, maxPlayers = 8) {
   await signIn();
   myUid = auth.currentUser.uid;
 
-  // Generate code yang belum dipakai
   let code = null;
   for (let i = 0; i < 12; i++) {
     const candidate = genRoomCode();
@@ -161,7 +174,6 @@ async function hostCreateRoom(selectedIds, maxPlayers = 8) {
   }
   if (!code) throw new Error('Gagal membuat kode room. Coba lagi.');
 
-  // Bersihkan timer lama
   clearHostState();
 
   const roomData = {
@@ -220,27 +232,22 @@ async function hostStartGame() {
   hostState.used = new Set();
   hostState.roundNumber = 0;
 
-  // Show host game screen
   showScreen('screen-host-game');
 
-  // Cleanup listener lama sebelum memasang yang baru.
   if (hostState.unsubRound) {
     hostState.unsubRound();
     hostState.unsubRound = null;
   }
 
-  // Watch current round for winner (host read seluruh currentRound termasuk targetId)
   hostState.unsubRound = onValue(ref(db, `rooms/${code}/currentRound`), async (snap) => {
     const data = snap.val();
     if (!data || !data.number) return;
     if (data.number !== hostState.roundNumber) return;
     if (!data.winner || data.processed) return;
 
-    // winner sekarang berbentuk { uid, cardId }
     const winnerUid = data.winner.uid;
     if (!winnerUid) return;
 
-    // Atomically mark processed to avoid double-scoring
     const res = await runTransaction(ref(db, `rooms/${code}/currentRound`), (cur) => {
       if (!cur || cur.processed || !cur.winner) return; // abort
       return { ...cur, processed: true };
@@ -249,7 +256,7 @@ async function hostStartGame() {
 
     clearTimeout(hostState.roundTimer);
 
-    // Guard: pemain bisa saja sudah keluar/ditendang sebelum skor ditambahkan.
+    // Guard: pemenang bisa saja sudah keluar/ditendang
     const stillThere = (await get(ref(db, `rooms/${code}/players/${winnerUid}`))).exists();
     if (!stillThere) {
       await delay(NEXT_ROUND_DELAY);
@@ -257,13 +264,11 @@ async function hostStartGame() {
       return;
     }
 
-    // Increment winner score
     await runTransaction(
       ref(db, `rooms/${code}/players/${winnerUid}/score`),
       s => (s || 0) + 1
     );
 
-    // Update host status
     const wsnap = await get(ref(db, `rooms/${code}/players/${winnerUid}`));
     const wname = wsnap.val()?.name || '?';
     const statusEl = document.getElementById('hostStatus');
@@ -297,13 +302,16 @@ async function hostNextRound() {
   const cards     = shuffle([targetId, ...distract]);
 
   const target = KANJI.find(k => k.id === targetId);
+  const targetMeaning = target ? (target.meaning || '?') : '?';
+  const targetReading = target ? (target.reading || '') : ''; // ⚠️ field reading
 
   hostState.roundNumber++;
 
   await set(ref(db, `rooms/${code}/currentRound`), {
     number: hostState.roundNumber,
     targetId,
-    targetMeaning: target ? target.meaning : '?',
+    targetMeaning,
+    targetReading,
     cards,
     remaining: pool.length - used.size,
     startedAt: serverTimestamp(),
@@ -311,27 +319,21 @@ async function hostNextRound() {
     processed: false
   });
 
-  // Update host HUD
-  const meaningEl = document.getElementById('hostMeaning');
-  if (meaningEl) {
-    meaningEl.textContent = target ? target.meaning : '?';
-    meaningEl.classList.remove('pop');
-    void meaningEl.offsetWidth;
-    meaningEl.classList.add('pop');
-  }
+  // Update host HUD — arti + hiragana
+  renderPrompt(document.getElementById('hostMeaning'), targetReading, targetMeaning);
+
   const remainEl = document.getElementById('hostRemainTag');
   if (remainEl) remainEl.innerHTML = `SISA<br>${pool.length - used.size}`;
 
   const statusEl = document.getElementById('hostStatus');
   if (statusEl) statusEl.textContent = 'Menunggu pemain klik...';
 
-  // Timeout: lock atomik via runTransaction agar tidak race dengan klik pemain.
   hostState.roundTimer = setTimeout(async () => {
     const res = await runTransaction(ref(db, `rooms/${code}/currentRound`), (cur) => {
       if (!cur || cur.winner || cur.expired) return; // abort
       return { ...cur, expired: true };
     });
-    if (!res.committed) return; // sudah ada pemenang, batalkan timeout
+    if (!res.committed) return;
 
     const statusEl2 = document.getElementById('hostStatus');
     if (statusEl2) statusEl2.textContent = 'Tidak ada yang menjawab. Lanjut...';
@@ -385,7 +387,6 @@ async function hostPlayAgain() {
   hostState.used = new Set();
   hostState.roundNumber = 0;
 
-  // FIX #2: tampilkan kembali pool selector + reset tombol Buat Room
   const poolSection = document.getElementById('poolSection');
   if (poolSection) poolSection.hidden = false;
   const btnCreate = document.getElementById('btnCreateRoom');
@@ -470,10 +471,8 @@ async function playerJoinRoom(code, playerName) {
   await signIn();
   myUid = auth.currentUser.uid;
 
-  // Reset guard keluar untuk sesi baru
   playerState.leaving = false;
 
-  // Baca meta & players secara terpisah (currentRound tidak dibaca di sini)
   const [metaSnap, playersSnap] = await Promise.all([
     get(ref(db, `rooms/${code}/meta`)),
     get(ref(db, `rooms/${code}/players`))
@@ -507,7 +506,6 @@ async function playerJoinRoom(code, playerName) {
 
 function playerWatchLobby(onUpdate) {
   const code = playerState.code;
-  // Bersihkan listener lobby lama jika ada (mencegah duplikat)
   if (playerState.unsubLobby) {
     playerState.unsubLobby();
     playerState.unsubLobby = null;
@@ -527,13 +525,11 @@ function playerExit(reason) {
   if (playerState.leaving) return;
   playerState.leaving = true;
 
-  // Lepas semua listener dulu supaya tidak memicu handler lain
   playerState.unsubSelf?.();   playerState.unsubSelf = null;
   playerState.unsubMeta?.();   playerState.unsubMeta = null;
   playerState.unsubLobby?.();  playerState.unsubLobby = null;
   cleanupPlayerGameListeners();
 
-  // Cegah onDisconnect menulis ke node yang sudah tidak ada
   if (code && uid) {
     try {
       onDisconnect(ref(db, `rooms/${code}/players/${uid}/online`))
@@ -560,7 +556,6 @@ function playerExit(reason) {
   showScreen('screen-multi-join');
 }
 
-// Player keluar sendiri (volunter) — opsional silent untuk navigasi keluar
 async function playerLeaveRoom({ silent = false } = {}) {
   const code = playerState.code;
   const uid  = playerState.uid;
@@ -576,7 +571,7 @@ async function playerLeaveRoom({ silent = false } = {}) {
 
   try {
     await onDisconnect(ref(db, `rooms/${code}/players/${uid}/online`)).cancel();
-  } catch { /* kalau offline, biarkan rule `online` yang menahan ghost */ }
+  } catch { /* offline: biarkan rule `online` yang menahan ghost */ }
 
   try {
     await remove(ref(db, `rooms/${code}/players/${uid}`));
@@ -598,7 +593,6 @@ async function playerLeaveRoom({ silent = false } = {}) {
   }
 }
 
-// Deteksi node diri sendiri hilang → ditendang host
 function playerWatchSelf() {
   const code = playerState.code;
   const uid  = playerState.uid;
@@ -614,8 +608,6 @@ function playerWatchSelf() {
     if (playerState.leaving) return;
     if (playerState.code !== code) return;
 
-    // Bedakan "ditendang" vs "room dibubarkan": kalau meta sudah hilang,
-    // biarkan handler meta (onDisbanded) yang menangani.
     let metaExists = true;
     try {
       metaExists = (await get(ref(db, `rooms/${code}/meta`))).exists();
@@ -627,7 +619,7 @@ function playerWatchSelf() {
 }
 
 // =========================================================
-// FIX #1: bersihkan semua listener khusus game (bukan lobby/meta)
+// Bersihkan listener game
 // =========================================================
 function cleanupPlayerGameListeners() {
   playerState.unsubRoundNumber?.();
@@ -641,9 +633,6 @@ function cleanupPlayerGameListeners() {
   playerState.currentRound = null;
 }
 
-// =========================================================
-// FIX #3: saat status kembali ke lobby, bersihkan listener game
-// =========================================================
 function playerWatchMeta(onStart, onFinish, onLobby, onDisbanded) {
   const code = playerState.code;
   if (playerState.unsubMeta) {
@@ -670,34 +659,29 @@ function playerWatchMeta(onStart, onFinish, onLobby, onDisbanded) {
   });
 }
 
-// =========================================================
-// FIX #2: playerBeginGame memakai cleanup + re-subscribe players
-// =========================================================
 function playerBeginGame() {
   const code = playerState.code;
 
   showScreen('screen-game');
 
-  // Bersihkan SEMUA listener game lama (lobby maupun game sebelumnya)
   cleanupPlayerGameListeners();
 
-  // Skor live
   playerState.unsubPlayers = onValue(ref(db, `rooms/${code}/players`), (snap) => {
     const players = snap.val() || {};
     renderScores(document.getElementById('scores'), players, myUid);
   });
 
-  // Round number watcher
   playerState.unsubRoundNumber = onValue(ref(db, `rooms/${code}/currentRound/number`), async (snap) => {
     const number = snap.val();
     if (!number) return;
     if (playerState.currentRound && playerState.currentRound.number === number) return;
 
-    const [cardsSnap, remainingSnap, winnerSnap, meaningSnap] = await Promise.all([
+    const [cardsSnap, remainingSnap, winnerSnap, meaningSnap, readingSnap] = await Promise.all([
       get(ref(db, `rooms/${code}/currentRound/cards`)),
       get(ref(db, `rooms/${code}/currentRound/remaining`)),
       get(ref(db, `rooms/${code}/currentRound/winner`)),
-      get(ref(db, `rooms/${code}/currentRound/targetMeaning`))
+      get(ref(db, `rooms/${code}/currentRound/targetMeaning`)),
+      get(ref(db, `rooms/${code}/currentRound/targetReading`))
     ]);
 
     const data = {
@@ -705,14 +689,14 @@ function playerBeginGame() {
       cards: cardsSnap.val() || [],
       remaining: remainingSnap.val() || 0,
       winner: winnerSnap.val(),
-      targetMeaning: meaningSnap.val() || '?'
+      targetMeaning: meaningSnap.val() || '?',
+      targetReading: readingSnap.val() || ''
     };
     playerState.currentRound = data;
     renderRound(data);
     if (data.winner) onRoundWon(data);
   });
 
-  // Winner watcher
   playerState.unsubRoundWinner = onValue(ref(db, `rooms/${code}/currentRound/winner`), (snap) => {
     const winner = snap.val();
     if (!winner) return;
@@ -723,7 +707,6 @@ function playerBeginGame() {
     onRoundWon({ ...playerState.currentRound, winner });
   });
 
-  // Host online watcher
   playerState.unsubHostOnline = onValue(
     ref(db, `rooms/${code}/players/${playerState.hostUid}/online`),
     (snap) => {
@@ -754,25 +737,20 @@ async function showPlayerResult() {
 }
 
 function renderRound(round) {
-  // Meaning (dari targetMeaning yang readable; targetId tidak pernah dikirim ke player)
-  const meaningEl = document.getElementById('meaning');
-  if (meaningEl) {
-    meaningEl.textContent = round.targetMeaning || '?';
-    meaningEl.classList.remove('pop');
-    void meaningEl.offsetWidth;
-    meaningEl.classList.add('pop');
-  }
+  // HUD: arti + hiragana (targetId tidak pernah dikirim ke player)
+  renderPrompt(
+    document.getElementById('meaning'),
+    round.targetReading,
+    round.targetMeaning
+  );
 
-  // Remain tag
   const remainEl = document.getElementById('remainTag');
   if (remainEl && typeof round.remaining === 'number') {
     remainEl.innerHTML = `SISA<br>${round.remaining}`;
   }
 
-  // Field
   renderField(document.getElementById('field'), round.cards);
 
-  // Reset click handlers via re-render
   document.querySelectorAll('#field .card').forEach(el => {
     el.addEventListener('click', () => onCardClick(el.dataset.id, el));
   });
@@ -789,7 +767,6 @@ function onRoundWon(round) {
     toast(`Ronde dimenangkan ${name}`, winnerUid === myUid ? 'good' : '');
   });
 
-  // Highlight kartu yang benar menggunakan cardId dari winner
   const cardId = round.winner?.cardId;
   if (cardId) {
     const correct = document.querySelector(`#field .card[data-id="${CSS.escape(cardId)}"]`);
@@ -801,11 +778,9 @@ async function onCardClick(cardId, btnEl) {
   const round = playerState.currentRound;
   if (!round || round.winner) return;
 
-  // Safety: jangan proses klik di luar kartu ronde ini
   if (round.cards && !round.cards.includes(cardId)) return;
 
   try {
-    // Klaim winner: hanya boleh berhasil jika cardId === targetId (dicek rules di server).
     const res = await runTransaction(
       ref(db, `rooms/${playerState.code}/currentRound/winner`),
       (cur) => {
@@ -818,11 +793,9 @@ async function onCardClick(cardId, btnEl) {
       btnEl.classList.add('found');
       toast('正解! +1 poin', 'good');
     } else if (!res.committed) {
-      // Abort: sudah ada pemenang lain
       toast('Terlambat!', 'bad');
     }
   } catch (err) {
-    // Rules menolak → cardId bukan targetId → klik salah
     btnEl.classList.add('wrong');
     setTimeout(() => btnEl.classList.remove('wrong'), 500);
   }
@@ -834,10 +807,6 @@ async function onCardClick(cardId, btnEl) {
 // =========================================================
 // =========================================================
 
-/**
- * PLAYER: dipanggil dari play.html (via boot.js)
- * @param {{prefilledRoom?: string|null}} opts
- */
 export function initPlayer(opts = {}) {
   const $ = id => document.getElementById(id);
 
@@ -851,7 +820,6 @@ export function initPlayer(opts = {}) {
     nameInput.focus();
   }
 
-  // Back link
   document.querySelectorAll('[data-back]').forEach(link => {
     link.addEventListener('click', (e) => {
       e.preventDefault();
@@ -863,7 +831,6 @@ export function initPlayer(opts = {}) {
     codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
   });
 
-  // Callback update daftar pemain di lobby
   const lobbyUpdateCallback = (players) => {
     const list  = $('lobbyPlayers');
     const cntEl = $('lobbyCount');
@@ -881,9 +848,7 @@ export function initPlayer(opts = {}) {
     }
   };
 
-  // Suntik tombol "Keluar Room" (lobby) & FAB "Keluar" (game) — idempoten
   function ensureLeaveButtons() {
-    // Lobby
     const lobbyScreen = document.getElementById('screen-multi-lobby');
     if (lobbyScreen && !document.getElementById('btnLeaveRoom')) {
       const wrapEl = document.createElement('div');
@@ -904,7 +869,6 @@ export function initPlayer(opts = {}) {
       (lobbyScreen.querySelector('.wrap') || lobbyScreen).appendChild(wrapEl);
     }
 
-    // Game (floating button)
     const gameScreen = document.getElementById('screen-game');
     if (gameScreen && !document.getElementById('btnLeaveGame')) {
       const fab = document.createElement('button');
@@ -939,7 +903,6 @@ export function initPlayer(opts = {}) {
         () => showPlayerResult(),
         () => {
           showScreen('screen-multi-lobby');
-          // Re-subscribe lobby karena listener game sudah di-cleanup
           playerWatchLobby(lobbyUpdateCallback);
         },
         () => playerExit('disbanded')
@@ -955,7 +918,6 @@ export function initPlayer(opts = {}) {
     }
   });
 
-  // Result buttons
   $('btnAgain')?.addEventListener('click', () => {
     if (playerState.code) {
       showScreen('screen-multi-lobby');
@@ -970,9 +932,6 @@ export function initPlayer(opts = {}) {
   });
 }
 
-/**
- * HOST: dipanggil dari host.html
- */
 export function initHost() {
   const $ = id => document.getElementById(id);
 
@@ -984,7 +943,6 @@ export function initHost() {
   const maxPlayersInput  = $('maxPlayersInput');
   const hostMaxPlayersEl = $('hostMaxPlayers');
 
-  // ----- Build book/chapter selector -----
   const selectedBooks    = new Set();
   const selectedChapters = new Set();
 
@@ -1055,7 +1013,6 @@ export function initHost() {
     updatePool();
   });
 
-  // Select all/none
   $('btnAll')?.addEventListener('click', () => {
     bookListEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       cb.checked = true;
@@ -1073,7 +1030,6 @@ export function initHost() {
 
   updatePool();
 
-  // ----- Create room -----
   btnCreate?.addEventListener('click', async () => {
     btnCreate.disabled = true;
     btnCreate.textContent = 'Membuat room...';
@@ -1090,10 +1046,8 @@ export function initHost() {
       $('hostRoomCode').textContent = code;
       $('poolSection').hidden = true;
 
-      // Show lobby
       showScreen('screen-host-lobby');
 
-      // Watch lobby
       let playerCount = 0;
       hostWatchLobby((players) => {
         const entries = Object.entries(players).filter(([_, p]) => !p.isHost);
@@ -1124,7 +1078,6 @@ export function initHost() {
     }
   });
 
-  // Copy room code
   $('btnCopyCode')?.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText($('roomCode').textContent);
@@ -1134,7 +1087,6 @@ export function initHost() {
     }
   });
 
-  // ----- Start game -----
   btnStart?.addEventListener('click', async () => {
     if (btnStart.disabled) return;
     btnStart.disabled = true;
@@ -1146,7 +1098,6 @@ export function initHost() {
     }
   });
 
-  // ----- Play again -----
   btnAgain?.addEventListener('click', async () => {
     try {
       await hostPlayAgain();
@@ -1155,7 +1106,6 @@ export function initHost() {
     }
   });
 
-  // ----- Disband room (lobby & result) -----
   document.querySelectorAll('[data-disband]').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!hostState.code) return;
@@ -1172,7 +1122,6 @@ export function initHost() {
     });
   });
 
-  // ----- Tendang pemain (delegasi, list di-render ulang terus) -----
   document.getElementById('hostPlayerList')?.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-kick]');
     if (!btn) return;
