@@ -249,6 +249,14 @@ async function hostStartGame() {
 
     clearTimeout(hostState.roundTimer);
 
+    // Guard: pemain bisa saja sudah keluar/ditendang sebelum skor ditambahkan.
+    const stillThere = (await get(ref(db, `rooms/${code}/players/${winnerUid}`))).exists();
+    if (!stillThere) {
+      await delay(NEXT_ROUND_DELAY);
+      hostNextRound();
+      return;
+    }
+
     // Increment winner score
     await runTransaction(
       ref(db, `rooms/${code}/players/${winnerUid}/score`),
@@ -420,6 +428,17 @@ async function hostDisbandRoom() {
 }
 
 // =========================================================
+// HOST: keluarkan satu pemain
+// =========================================================
+async function hostKickPlayer(targetUid) {
+  const code = hostState.code;
+  if (!code || !targetUid) return;
+  if (targetUid === hostState.uid) return; // jangan tendang diri sendiri
+
+  await remove(ref(db, `rooms/${code}/players/${targetUid}`));
+}
+
+// =========================================================
 // =========================================================
 // PLAYER
 // =========================================================
@@ -431,6 +450,9 @@ let playerState = {
   currentRound: null,
   unsubPlayers: null,
   unsubMeta: null,
+  unsubLobby: null,
+  unsubSelf: null,
+  leaving: false,
   unsubRoundNumber: null,
   unsubRoundWinner: null,
   unsubHostOnline: null,
@@ -447,6 +469,9 @@ async function playerJoinRoom(code, playerName) {
 
   await signIn();
   myUid = auth.currentUser.uid;
+
+  // Reset guard keluar untuk sesi baru
+  playerState.leaving = false;
 
   // Baca meta & players secara terpisah (currentRound tidak dibaca di sini)
   const [metaSnap, playersSnap] = await Promise.all([
@@ -490,6 +515,114 @@ function playerWatchLobby(onUpdate) {
   playerState.unsubLobby = onValue(ref(db, `rooms/${code}/players`), (snap) => {
     const players = snap.val() || {};
     onUpdate(players);
+  });
+}
+
+// =========================================================
+// Keluar room / ditendang / room dibubarkan → satu pintu keluar
+// =========================================================
+function playerExit(reason) {
+  const code = playerState.code;
+  const uid  = playerState.uid;
+  if (playerState.leaving) return;
+  playerState.leaving = true;
+
+  // Lepas semua listener dulu supaya tidak memicu handler lain
+  playerState.unsubSelf?.();   playerState.unsubSelf = null;
+  playerState.unsubMeta?.();   playerState.unsubMeta = null;
+  playerState.unsubLobby?.();  playerState.unsubLobby = null;
+  cleanupPlayerGameListeners();
+
+  // Cegah onDisconnect menulis ke node yang sudah tidak ada
+  if (code && uid) {
+    try {
+      onDisconnect(ref(db, `rooms/${code}/players/${uid}/online`))
+        .cancel()
+        .catch(() => {});
+    } catch { /* ignore */ }
+  }
+
+  playerState.code = null;
+  playerState.uid  = null;
+  playerState.name = null;
+  playerState.hostUid = null;
+  playerState.currentRound = null;
+
+  toast(
+    reason === 'kicked'
+      ? 'Kamu dikeluarkan oleh wasit'
+      : 'Room telah dibubarkan oleh wasit',
+    'bad'
+  );
+
+  const codeInput = document.getElementById('joinCode');
+  if (codeInput) codeInput.value = '';
+  showScreen('screen-multi-join');
+}
+
+// Player keluar sendiri (volunter) — opsional silent untuk navigasi keluar
+async function playerLeaveRoom({ silent = false } = {}) {
+  const code = playerState.code;
+  const uid  = playerState.uid;
+  if (!code || !uid) return;
+  if (playerState.leaving) return;
+
+  playerState.leaving = true;
+
+  playerState.unsubSelf?.();   playerState.unsubSelf = null;
+  playerState.unsubMeta?.();   playerState.unsubMeta = null;
+  playerState.unsubLobby?.();  playerState.unsubLobby = null;
+  cleanupPlayerGameListeners();
+
+  try {
+    await onDisconnect(ref(db, `rooms/${code}/players/${uid}/online`)).cancel();
+  } catch { /* kalau offline, biarkan rule `online` yang menahan ghost */ }
+
+  try {
+    await remove(ref(db, `rooms/${code}/players/${uid}`));
+  } catch (err) {
+    console.warn('Gagal keluar room:', err);
+  }
+
+  playerState.code = null;
+  playerState.uid  = null;
+  playerState.name = null;
+  playerState.hostUid = null;
+  playerState.currentRound = null;
+
+  if (!silent) {
+    toast('Kamu keluar dari room', '');
+    const codeInput = document.getElementById('joinCode');
+    if (codeInput) codeInput.value = '';
+    showScreen('screen-multi-join');
+  }
+}
+
+// Deteksi node diri sendiri hilang → ditendang host
+function playerWatchSelf() {
+  const code = playerState.code;
+  const uid  = playerState.uid;
+  if (!code || !uid) return;
+
+  if (playerState.unsubSelf) {
+    playerState.unsubSelf();
+    playerState.unsubSelf = null;
+  }
+
+  playerState.unsubSelf = onValue(ref(db, `rooms/${code}/players/${uid}`), async (snap) => {
+    if (snap.exists()) return;
+    if (playerState.leaving) return;
+    if (playerState.code !== code) return;
+
+    // Bedakan "ditendang" vs "room dibubarkan": kalau meta sudah hilang,
+    // biarkan handler meta (onDisbanded) yang menangani.
+    let metaExists = true;
+    try {
+      metaExists = (await get(ref(db, `rooms/${code}/meta`))).exists();
+    } catch { /* offline: anggap ditendang */ }
+
+    if (!metaExists) return;
+    playerExit('kicked');
   });
 }
 
@@ -748,6 +881,48 @@ export function initPlayer(opts = {}) {
     }
   };
 
+  // Suntik tombol "Keluar Room" (lobby) & FAB "Keluar" (game) — idempoten
+  function ensureLeaveButtons() {
+    // Lobby
+    const lobbyScreen = document.getElementById('screen-multi-lobby');
+    if (lobbyScreen && !document.getElementById('btnLeaveRoom')) {
+      const wrapEl = document.createElement('div');
+      wrapEl.className = 'leave-room-wrap';
+      const btn = document.createElement('button');
+      btn.id = 'btnLeaveRoom';
+      btn.type = 'button';
+      btn.className = 'btn';
+      btn.textContent = 'Keluar Room';
+      btn.addEventListener('click', async () => {
+        if (!playerState.code) return;
+        if (!confirm('Keluar dari room ini?')) return;
+        btn.disabled = true;
+        try { await playerLeaveRoom(); }
+        finally { btn.disabled = false; }
+      });
+      wrapEl.appendChild(btn);
+      (lobbyScreen.querySelector('.wrap') || lobbyScreen).appendChild(wrapEl);
+    }
+
+    // Game (floating button)
+    const gameScreen = document.getElementById('screen-game');
+    if (gameScreen && !document.getElementById('btnLeaveGame')) {
+      const fab = document.createElement('button');
+      fab.id = 'btnLeaveGame';
+      fab.type = 'button';
+      fab.className = 'btn btn-leave-fab';
+      fab.textContent = 'Keluar';
+      fab.addEventListener('click', async () => {
+        if (!playerState.code) return;
+        if (!confirm('Keluar dari room ini? Permainan tetap berjalan.')) return;
+        fab.disabled = true;
+        try { await playerLeaveRoom(); }
+        finally { fab.disabled = false; }
+      });
+      gameScreen.appendChild(fab);
+    }
+  }
+
   btnJoin?.addEventListener('click', async () => {
     errEl.textContent = '';
     btnJoin.disabled = true;
@@ -767,17 +942,11 @@ export function initPlayer(opts = {}) {
           // Re-subscribe lobby karena listener game sudah di-cleanup
           playerWatchLobby(lobbyUpdateCallback);
         },
-        () => {
-          toast('Room telah dibubarkan oleh wasit', 'bad');
-          playerState.code = null;
-          playerState.name = null;
-          playerState.hostUid = null;
-          playerState.currentRound = null;
-          const codeInput2 = document.getElementById('joinCode');
-          if (codeInput2) codeInput2.value = '';
-          showScreen('screen-multi-join');
-        }
+        () => playerExit('disbanded')
       );
+
+      playerWatchSelf();
+      ensureLeaveButtons();
     } catch (err) {
       errEl.textContent = err.message || 'Gagal bergabung.';
     } finally {
@@ -795,7 +964,8 @@ export function initPlayer(opts = {}) {
       location.href = 'play.html';
     }
   });
-  $('btnChange')?.addEventListener('click', () => {
+  $('btnChange')?.addEventListener('click', async () => {
+    if (playerState.code) await playerLeaveRoom({ silent: true });
     location.href = 'play.html';
   });
 }
@@ -938,10 +1108,9 @@ export function initHost() {
           listEl.innerHTML = entries.map(([id, p]) => `
             <li class="${p.online === false ? 'offline' : ''}">
               <span class="dot ${p.online === false ? 'offline' : ''}"></span>
-              ${escHtml(p.name || '?')}
-              <span style="margin-left:auto;font-size:.75rem;color:#9b8460;">
-                ${p.online === false ? 'offline' : 'online'}
-              </span>
+              <span class="pname">${escHtml(p.name || '?')}</span>
+              <span class="pstate">${p.online === false ? 'offline' : 'online'}</span>
+              <button class="btn kick-btn" type="button" data-kick="${id}">Tendang</button>
             </li>
           `).join('');
         }
@@ -1001,5 +1170,24 @@ export function initHost() {
         btn.disabled = false;
       }
     });
+  });
+
+  // ----- Tendang pemain (delegasi, list di-render ulang terus) -----
+  document.getElementById('hostPlayerList')?.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-kick]');
+    if (!btn) return;
+
+    const uid   = btn.dataset.kick;
+    const pname = btn.closest('li')?.querySelector('.pname')?.textContent?.trim() || 'pemain';
+    if (!confirm(`Keluarkan ${pname} dari room?`)) return;
+
+    btn.disabled = true;
+    try {
+      await hostKickPlayer(uid);
+      toast(`${pname} dikeluarkan`, 'good');
+    } catch (err) {
+      toast(err.message || 'Gagal mengeluarkan pemain', 'bad');
+      btn.disabled = false;
+    }
   });
 }
