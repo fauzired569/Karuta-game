@@ -1,5 +1,7 @@
 # 漢字かるた — Kanji Karuta
 
+🔗 **Demo Online:** https://fauzired569.github.io/Karuta-game/
+
 Game kartu kanji bergaya karuta: cocokkan **arti** dengan **kanji** di lapangan.
 Tersedia mode **Solo** (1 pemain vs 3 bot) dan **Multiplayer** (wasit/host memandu ronde
 real-time lewat Firebase Realtime Database, pemain saling berebut klik kanji yang benar).
