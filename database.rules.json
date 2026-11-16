@@ -57,7 +57,16 @@
           "expired":       { ".read": "auth != null" },
           "winner": {
             ".read": "auth != null",
-            ".write": "auth != null && ((newData.hasChildren(['uid','cardId']) && newData.child('uid').val() === auth.uid && newData.child('cardId').val() === root.child('rooms').child($code).child('currentRound').child('targetId').val() && !data.exists()) || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val())"
+            ".write": "auth != null && (
+              (
+                newData.hasChildren(['uid','cardId','round'])
+                && newData.child('uid').val() === auth.uid
+                && newData.child('cardId').val() === root.child('rooms').child($code).child('currentRound').child('targetId').val()
+                && newData.child('round').val() === root.child('rooms').child($code).child('currentRound').child('number').val()
+                && !data.exists()
+              )
+              || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()
+            )"
           }
         }
       }
