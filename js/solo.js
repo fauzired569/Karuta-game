@@ -10,7 +10,10 @@ import { buildPool, shuffle, rollBotParams } from './core.js';
 // =========================================================
 const FIELD_SIZE       = 20;
 const MIN_POOL         = 8;
-const ROUND_TIMEOUT_MS = 15000;
+// ✅ PATCH 2: harus > reactionTime maksimum bot (25s) dari core.js → rollBotParams().
+// Sebelumnya 15000 — bot tidak akan pernah menang karena timer ronde habis
+// 10 detik lebih awal dari bot tercepat.
+const ROUND_TIMEOUT_MS = 28000;
 const NEXT_ROUND_DELAY = 2500;
 
 const HUMAN_ID   = 'you';
@@ -401,4 +404,4 @@ function wireControls() {
   resetPlayers();
   wireControls();
 })();
-})();
+// ✅ PATCH 1: stray `})();` yang menyebabkan SyntaxError sudah dihapus.
