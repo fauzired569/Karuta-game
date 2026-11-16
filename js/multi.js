@@ -183,7 +183,7 @@ let hostState = {
   unsubMeta: null
 };
 
-// ✅ FIX: callback render lobby disimpan module-level supaya hostPlayAgain()
+// Callback render lobby disimpan module-level supaya hostPlayAgain()
 // bisa re-attach listener saat kembali ke lobby setelah game selesai.
 let hostLobbyRenderFn = null;
 
@@ -266,9 +266,8 @@ async function hostStartGame() {
 
   showScreen('screen-host-game');
 
-  // ✅ FIX: ganti listener lobby (yang menulis ke #hostPlayerList tersembunyi)
+  // Ganti listener lobby (yang menulis ke #hostPlayerList tersembunyi)
   // dengan listener skor yang menulis ke #hostScores di layar game.
-  // Host sekarang melihat skor live selama permainan berjalan.
   if (hostState.unsubPlayers) {
     hostState.unsubPlayers();
     hostState.unsubPlayers = null;
@@ -473,9 +472,7 @@ async function hostPlayAgain() {
   if (!code) return;
   clearTimeout(hostState.roundTimer);
 
-  // ✅ FIX: lepas listener skor game. Tanpa ini, listener #hostScores
-  // tetap aktif dan terus menulis ke elemen tak terlihat selama di lobby
-  // / result screen (tidak crash, tapi boros listener & membingungkan debug).
+  // Lepas listener skor game.
   if (hostState.unsubPlayers) {
     hostState.unsubPlayers();
     hostState.unsubPlayers = null;
@@ -509,9 +506,7 @@ async function hostPlayAgain() {
 
   showScreen('screen-host-lobby');
 
-  // ✅ FIX: re-attach listener lobby. Tanpa ini, #hostPlayerList & #btnStartGame
-  // tidak ter-update ketika pemain join/keluar di ronde berikutnya.
-  // Listener skor ronde sebelumnya sudah dilepas di atas.
+  // Re-attach listener lobby.
   if (hostLobbyRenderFn) {
     hostWatchLobby(hostLobbyRenderFn);
   }
@@ -821,27 +816,45 @@ function playerBeginGame() {
     // Tolak kalau ada fetch lebih baru (out-of-order)
     if (token !== playerState._roundToken) return;
 
+    // ✅ FIX B: get(winner) bisa mengembalikan nilai cache yang masih
+    // menyimpan winner ronde sebelumnya. Validasi round-nya sebelum dipakai.
+    // Tanpa ini, klik ronde baru langsung ter-disable di onRoundWon().
+    const rawWinner = winnerSnap?.val();
+    const validWinner = (rawWinner && rawWinner.round === number) ? rawWinner : null;
+    if (rawWinner && !validWinner) {
+      console.warn('[multi] stale winner di fetch ronde', number, '→ diabaikan:', rawWinner);
+    }
+
     const data = {
       number,
       cards: cardsSnap?.val() || [],
       remaining: remainingSnap?.val() || 0,
-      winner: winnerSnap?.val() || null,
+      winner: validWinner,
       targetMeaning: meaningSnap?.val() || '?',
       targetReading: readingSnap?.val() || '',
       pending: false
     };
     playerState.currentRound = data;
     renderRound(data);
-    if (data.winner) onRoundWon(data);
+    if (validWinner) onRoundWon(data);
   });
 
-  // Winner watcher — abaikan jika pending / sudah ada winner
+  // Winner watcher — abaikan jika pending / sudah ada winner / stale round
   playerState.unsubRoundWinner = onValue(ref(db, `rooms/${code}/currentRound/winner`), (snap) => {
     const winner = snap.val();
     if (!winner) return;
     const cur = playerState.currentRound;
     if (!cur || cur.pending) return;
     if (cur.winner) return;
+
+    // ✅ FIX A: winner.round harus cocok dengan cur.number.
+    // Kalau tidak cocok, ini stale notification dari ronde sebelumnya —
+    // abaikan. Tanpa guard ini, notifikasi lama bisa mengisi cur.winner
+    // dan mengunci kartu ronde baru sebelum pemain sempat klik.
+    if (winner.round !== cur.number) {
+      console.warn('[multi] stale winner di watcher → diabaikan:', winner, 'current round:', cur.number);
+      return;
+    }
 
     cur.winner = winner;
     onRoundWon({ ...cur, winner });
@@ -899,6 +912,17 @@ function renderRound(round) {
 }
 
 function onRoundWon(round) {
+  // ✅ FIX D: guard defensive — jangan disable kartu kalau bukan ronde aktif.
+  // onRoundWon bisa dipanggil dari fetch (round === playerState.currentRound)
+  // atau dari winner watcher ({...cur, winner}). Kalau currentRound sudah
+  // berubah (Promise resolve terlambat setelah ronde baru render), jangan
+  // sentuh kartu ronde baru.
+  const cur = playerState.currentRound;
+  if (!cur || cur.number !== round.number) {
+    console.warn('[multi] onRoundWon untuk ronde', round.number, 'diabaikan (current:', cur?.number, ')');
+    return;
+  }
+
   document.querySelectorAll('#field .card').forEach(el => { el.style.pointerEvents = 'none'; });
   const winnerUid = round.winner?.uid;
   if (!winnerUid) return;
@@ -938,16 +962,22 @@ async function onCardClick(cardId, btnEl) {
     const weWon =
       res.committed &&
       written?.uid === myUid &&
-      written?.cardId === cardId;
+      written?.cardId === cardId &&
+      written?.round === round.number;
 
     if (weWon) {
-      // Fix 1: kunci lokal SEGERA. Ini menutup jendela ~50–200ms
-      // antara transaksi sukses dan watcher currentRound/winner firing,
-      // di mana pemain sebelumnya masih bisa klik kartu lain.
-      round.winner = { uid: myUid, cardId };
-      document.querySelectorAll('#field .card').forEach(el => {
-        el.style.pointerEvents = 'none';
-      });
+      // Fix 1 + Fix C: kunci lokal SEGERA, dan sertakan round di objek lokal.
+      round.winner = { uid: myUid, cardId, round: round.number };
+
+      // ✅ FIX C: hanya disable kartu kalau ronde ini MASIH aktif.
+      // Kalau transaksi resolve terlambat (setelah ronde berikutnya render),
+      // jangan sentuh kartu ronde baru.
+      if (playerState.currentRound?.number === round.number) {
+        document.querySelectorAll('#field .card').forEach(el => {
+          el.style.pointerEvents = 'none';
+        });
+      }
+
       btnEl.classList.add('found');
       toast('正解! +1 poin', 'good');
     } else if (!res.committed) {
@@ -955,17 +985,22 @@ async function onCardClick(cardId, btnEl) {
       toast('Terlambat!', 'bad');
     }
   } catch (err) {
-    // Fix 5: surface error — jangan biarkan user bingung kenapa klik tidak
-    // menghasilkan efek apa pun.
+    // Fix 5: surface error.
     btnEl.classList.add('wrong');
     setTimeout(() => btnEl.classList.remove('wrong'), 500);
+
     const denied =
       err?.code === 'PERMISSION_DENIED' ||
       /permission/i.test(err?.message || '');
+
+    const alreadyWon = !!round.winner;
+
     toast(
-      denied
-        ? 'Klik tidak valid (ronde sudah berakhir?)'
-        : 'Gagal mengirim jawaban, coba lagi',
+      denied && !alreadyWon
+        ? 'Bukan kartu itu, coba lagi'
+        : denied
+          ? 'Terlambat!'
+          : 'Gagal mengirim jawaban, coba lagi',
       'bad'
     );
   } finally {
@@ -1122,8 +1157,6 @@ export function initHost() {
     return pool;
   }
 
-  // ✅ FIX: nama fungsi eksplisit supaya bisa disimpan di hostLobbyRenderFn
-  // dan dipakai ulang di hostPlayAgain().
   function renderHostLobbyPlayers(players) {
     const entries = Object.entries(players).filter(([_, p]) => !p.isHost);
     const onlineCount = entries.filter(([_, p]) => p.online !== false).length;
@@ -1239,8 +1272,6 @@ export function initHost() {
 
       showScreen('screen-host-lobby');
 
-      // ✅ Pakai callback bernama (bukan inline) supaya bisa dipakai ulang
-      // oleh hostPlayAgain.
       hostWatchLobby(renderHostLobbyPlayers);
     } catch (err) {
       toast(err.message || 'Gagal membuat room', 'bad');
