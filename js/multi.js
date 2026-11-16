@@ -183,6 +183,10 @@ let hostState = {
   unsubMeta: null
 };
 
+// ✅ FIX: callback render lobby disimpan module-level supaya hostPlayAgain()
+// bisa re-attach listener saat kembali ke lobby setelah game selesai.
+let hostLobbyRenderFn = null;
+
 async function hostCreateRoom(selectedIds, maxPlayers = 8) {
   await signIn();
   myUid = auth.currentUser.uid;
@@ -238,6 +242,10 @@ function clearHostState() {
 
 function hostWatchLobby(onUpdate) {
   const code = hostState.code;
+  if (hostState.unsubPlayers) {
+    hostState.unsubPlayers();
+    hostState.unsubPlayers = null;
+  }
   hostState.unsubPlayers = onValue(ref(db, `rooms/${code}/players`), (snap) => {
     const players = snap.val() || {};
     onUpdate(players);
@@ -257,6 +265,18 @@ async function hostStartGame() {
   hostState.roundNumber = 0;
 
   showScreen('screen-host-game');
+
+  // ✅ FIX: ganti listener lobby (yang menulis ke #hostPlayerList tersembunyi)
+  // dengan listener skor yang menulis ke #hostScores di layar game.
+  // Host sekarang melihat skor live selama permainan berjalan.
+  if (hostState.unsubPlayers) {
+    hostState.unsubPlayers();
+    hostState.unsubPlayers = null;
+  }
+  hostState.unsubPlayers = onValue(ref(db, `rooms/${code}/players`), (snap) => {
+    const players = snap.val() || {};
+    renderScores(document.getElementById('hostScores'), players, hostState.uid);
+  });
 
   if (hostState.unsubRound) {
     hostState.unsubRound();
@@ -453,6 +473,14 @@ async function hostPlayAgain() {
   if (!code) return;
   clearTimeout(hostState.roundTimer);
 
+  // ✅ FIX: lepas listener skor game. Tanpa ini, listener #hostScores
+  // tetap aktif dan terus menulis ke elemen tak terlihat selama di lobby
+  // / result screen (tidak crash, tapi boros listener & membingungkan debug).
+  if (hostState.unsubPlayers) {
+    hostState.unsubPlayers();
+    hostState.unsubPlayers = null;
+  }
+
   if (hostState.unsubRound) {
     hostState.unsubRound();
     hostState.unsubRound = null;
@@ -480,6 +508,13 @@ async function hostPlayAgain() {
   }
 
   showScreen('screen-host-lobby');
+
+  // ✅ FIX: re-attach listener lobby. Tanpa ini, #hostPlayerList & #btnStartGame
+  // tidak ter-update ketika pemain join/keluar di ronde berikutnya.
+  // Listener skor ronde sebelumnya sudah dilepas di atas.
+  if (hostLobbyRenderFn) {
+    hostWatchLobby(hostLobbyRenderFn);
+  }
 }
 
 async function hostDisbandRoom() {
@@ -1087,6 +1122,35 @@ export function initHost() {
     return pool;
   }
 
+  // ✅ FIX: nama fungsi eksplisit supaya bisa disimpan di hostLobbyRenderFn
+  // dan dipakai ulang di hostPlayAgain().
+  function renderHostLobbyPlayers(players) {
+    const entries = Object.entries(players).filter(([_, p]) => !p.isHost);
+    const onlineCount = entries.filter(([_, p]) => p.online !== false).length;
+
+    btnStart.disabled = onlineCount < 2;
+    btnStart.textContent = onlineCount < 2
+      ? `Mulai (butuh ≥2, saat ini ${onlineCount}) ▸`
+      : `Mulai (${onlineCount} pemain) ▸`;
+
+    const listEl = $('hostPlayerList');
+    if (listEl) {
+      listEl.innerHTML = entries.map(([id, p]) => `
+        <li class="${p.online === false ? 'offline' : ''}">
+          <span class="dot ${p.online === false ? 'offline' : ''}"></span>
+          <span class="pname">${escHtml(p.name || '?')}</span>
+          <span class="pstate">${p.online === false ? 'offline' : 'online'}</span>
+          <button class="btn kick-btn" type="button" data-kick="${id}">Tendang</button>
+        </li>
+      `).join('');
+    }
+    const cntEl = $('hostPlayerCount');
+    if (cntEl) cntEl.textContent = onlineCount;
+  }
+
+  // Daftarkan callback agar hostPlayAgain bisa re-attach.
+  hostLobbyRenderFn = renderHostLobbyPlayers;
+
   Object.entries(STRUCTURE).forEach(([book, chapters]) => {
     const bookDiv = document.createElement('div');
     bookDiv.className = 'book';
@@ -1175,29 +1239,9 @@ export function initHost() {
 
       showScreen('screen-host-lobby');
 
-      let playerCount = 0;
-      hostWatchLobby((players) => {
-        const entries = Object.entries(players).filter(([_, p]) => !p.isHost);
-        playerCount = entries.filter(([_, p]) => p.online !== false).length;
-        btnStart.disabled = playerCount < 2;
-        btnStart.textContent = playerCount < 2
-          ? `Mulai (butuh ≥2, saat ini ${playerCount}) ▸`
-          : `Mulai (${playerCount} pemain) ▸`;
-
-        const listEl = $('hostPlayerList');
-        if (listEl) {
-          listEl.innerHTML = entries.map(([id, p]) => `
-            <li class="${p.online === false ? 'offline' : ''}">
-              <span class="dot ${p.online === false ? 'offline' : ''}"></span>
-              <span class="pname">${escHtml(p.name || '?')}</span>
-              <span class="pstate">${p.online === false ? 'offline' : 'online'}</span>
-              <button class="btn kick-btn" type="button" data-kick="${id}">Tendang</button>
-            </li>
-          `).join('');
-        }
-        const cntEl = $('hostPlayerCount');
-        if (cntEl) cntEl.textContent = playerCount;
-      });
+      // ✅ Pakai callback bernama (bukan inline) supaya bisa dipakai ulang
+      // oleh hostPlayAgain.
+      hostWatchLobby(renderHostLobbyPlayers);
     } catch (err) {
       toast(err.message || 'Gagal membuat room', 'bad');
       btnCreate.disabled = false;
