@@ -91,17 +91,26 @@
     </div>
   </section>
 
-  <!-- ============ GAME (shared: solo & multi) ============ -->
+    <!-- ============ GAME (shared: solo & multi) ============ -->
   <section id="screen-game" class="screen">
     <div class="hud">
       <div class="referee">
         <div class="tag">読み札<br>WASIT</div>
-        <div class="meaning" id="meaning">…</div>
+        <div class="meaning" id="meaning">
+          <span class="prompt-reading"></span>
+          <span class="prompt-meaning">…</span>
+        </div>
         <div class="tag" id="remainTag" style="background:#6b4a2a;">SISA<br>–</div>
       </div>
       <div class="scores" id="scores"></div>
     </div>
     <div class="field" id="field"></div>
+
+    <!-- ✅ NEW: tombol keluar untuk solo maupun player multiplayer.
+         solo.js dan multi.js masing-masing memasang handler-nya sendiri
+         (hanya satu modul yang di-load per halaman, jadi tidak konflik).
+         Gaya visual (.btn-leave-fab) sudah ada di style.css. -->
+    <button class="btn btn-leave-fab" id="btnLeaveGame" type="button">Keluar</button>
   </section>
 
   <!-- ============ RESULT ============ -->
