@@ -893,19 +893,46 @@ async function onCardClick(cardId, btnEl) {
       ref(db, `rooms/${playerState.code}/currentRound/winner`),
       (cur) => {
         if (cur != null) return;
-        return { uid: myUid, cardId };
+        // Fix 2: sertakan nomor ronde supaya rule bisa memvalidasi
+        // bahwa klik ini memang untuk ronde yang sedang berjalan.
+        return { uid: myUid, cardId, round: round.number };
       }
     );
 
-    if (res.committed && res.snapshot.val()?.uid === myUid) {
+    const written = res.snapshot?.val();
+    const weWon =
+      res.committed &&
+      written?.uid === myUid &&
+      written?.cardId === cardId;
+
+    if (weWon) {
+      // Fix 1: kunci lokal SEGERA. Ini menutup jendela ~50–200ms
+      // antara transaksi sukses dan watcher currentRound/winner firing,
+      // di mana pemain sebelumnya masih bisa klik kartu lain.
+      round.winner = { uid: myUid, cardId };
+      document.querySelectorAll('#field .card').forEach(el => {
+        el.style.pointerEvents = 'none';
+      });
       btnEl.classList.add('found');
       toast('正解! +1 poin', 'good');
     } else if (!res.committed) {
+      // Transaksi abort karena winner sudah ada (orang lain lebih cepat).
       toast('Terlambat!', 'bad');
     }
   } catch (err) {
+    // Fix 5: surface error — jangan biarkan user bingung kenapa klik tidak
+    // menghasilkan efek apa pun.
     btnEl.classList.add('wrong');
     setTimeout(() => btnEl.classList.remove('wrong'), 500);
+    const denied =
+      err?.code === 'PERMISSION_DENIED' ||
+      /permission/i.test(err?.message || '');
+    toast(
+      denied
+        ? 'Klik tidak valid (ronde sudah berakhir?)'
+        : 'Gagal mengirim jawaban, coba lagi',
+      'bad'
+    );
   } finally {
     round._claiming = false;
   }
