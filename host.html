@@ -63,7 +63,7 @@
     </div>
   </section>
 
-  <!-- ============ GAME ============ -->
+    <!-- ============ GAME ============ -->
   <section id="screen-host-game" class="screen">
     <div class="hud">
       <div class="referee">
@@ -78,6 +78,16 @@
     </div>
     <div class="host-status" id="hostStatus">Pilih kanji untuk jadi soal…</div>
     <div class="kanji-picker" id="kanjiPicker"></div>
+
+    <!-- ✅ NEW: kontrol host saat game berlangsung.
+         Kedua tombol bersifat FAB (fixed bottom-right) agar tidak
+         mengganggu layout picker yang scrollable. -->
+    <div class="host-game-actions">
+      <button class="btn" id="btnFinishGame" type="button"
+              title="Akhiri permainan dan tampilkan hasil akhir">🏁 Akhiri</button>
+      <button class="btn btn-danger" id="btnDisbandGame" type="button"
+              data-disband title="Bubarkan room — semua pemain dikeluarkan">🚪 Bubar</button>
+    </div>
   </section>
 
   <!-- ============ RESULT ============ -->
