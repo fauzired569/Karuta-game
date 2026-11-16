@@ -180,7 +180,8 @@ let hostState = {
   roundTimer: null,
   unsubPlayers: null,
   unsubRound: null,
-  unsubMeta: null
+  unsubMeta: null,
+  finished: false   // ✅ NEW: guard agar "Akhiri" tidak dobel-finish
 };
 
 // Callback render lobby disimpan module-level supaya hostPlayAgain()
@@ -238,6 +239,7 @@ function clearHostState() {
   hostState.unsubPlayers = hostState.unsubRound = hostState.unsubMeta = null;
   hostState.used = new Set();
   hostState.roundNumber = 0;
+  hostState.finished = false;   // ✅ NEW
 }
 
 function hostWatchLobby(onUpdate) {
@@ -255,6 +257,8 @@ function hostWatchLobby(onUpdate) {
 async function hostStartGame() {
   const code = hostState.code;
   if (!code) return;
+
+  hostState.finished = false;   // ✅ NEW: reset saat game baru mulai
 
   await update(ref(db, `rooms/${code}/meta`), {
     status: 'playing',
@@ -284,6 +288,10 @@ async function hostStartGame() {
 
   // Winner listener (satu listener untuk semua ronde)
   hostState.unsubRound = onValue(ref(db, `rooms/${code}/currentRound`), async (snap) => {
+    // ✅ NEW: kalau host sudah menekan "Akhiri", abaikan semua notifikasi
+    // winner yang telat masuk.
+    if (hostState.finished) return;
+
     const data = snap.val();
     if (!data || !data.number) return;
     if (data.number !== hostState.roundNumber) return;
@@ -353,6 +361,9 @@ function renderKanjiPicker() {
 }
 
 function hostReadyForNextPick() {
+  // ✅ NEW: kalau host sudah mengakhiri game, jangan render picker / prompt lagi.
+  if (hostState.finished) return;
+
   renderPrompt(document.getElementById('hostMeaning'), '', 'Pilih kanji di bawah…');
   const remainEl = document.getElementById('hostRemainTag');
   if (remainEl) remainEl.innerHTML = `SISA<br>${hostState.pool.length - hostState.used.size}`;
@@ -372,6 +383,7 @@ async function hostPickKanji(cardId) {
   if (!code) return;
   if (hostState.used.has(cardId)) return;
   if (!hostState.pool.includes(cardId)) return;
+  if (hostState.finished) return;   // ✅ NEW: cegah pilih kanji setelah game selesai
 
   clearTimeout(hostState.roundTimer);
 
@@ -437,11 +449,27 @@ async function hostPickKanji(cardId) {
 async function finishHostGame() {
   const code = hostState.code;
   if (!code) return;
+
+  // ✅ NEW: idempoten. Kalau sudah finished, cukup tampilkan hasil.
+  if (hostState.finished) {
+    await showHostResult();
+    return;
+  }
+  hostState.finished = true;
+
   clearTimeout(hostState.roundTimer);
+
+  // Lepas listener ronde (host tidak lagi memantau winner).
   if (hostState.unsubRound) {
     hostState.unsubRound();
     hostState.unsubRound = null;
   }
+  // Lepas listener skor game — tidak diperlukan di layar hasil.
+  if (hostState.unsubPlayers) {
+    hostState.unsubPlayers();
+    hostState.unsubPlayers = null;
+  }
+
   await update(ref(db, `rooms/${code}/meta`), { status: 'finished' });
   await showHostResult();
 }
@@ -471,6 +499,7 @@ async function hostPlayAgain() {
   const code = hostState.code;
   if (!code) return;
   clearTimeout(hostState.roundTimer);
+  hostState.finished = false;   // ✅ NEW: siap untuk game berikutnya
 
   // Lepas listener skor game.
   if (hostState.unsubPlayers) {
@@ -818,7 +847,6 @@ function playerBeginGame() {
 
     // ✅ FIX B: get(winner) bisa mengembalikan nilai cache yang masih
     // menyimpan winner ronde sebelumnya. Validasi round-nya sebelum dipakai.
-    // Tanpa ini, klik ronde baru langsung ter-disable di onRoundWon().
     const rawWinner = winnerSnap?.val();
     const validWinner = (rawWinner && rawWinner.round === number) ? rawWinner : null;
     if (rawWinner && !validWinner) {
@@ -848,9 +876,6 @@ function playerBeginGame() {
     if (cur.winner) return;
 
     // ✅ FIX A: winner.round harus cocok dengan cur.number.
-    // Kalau tidak cocok, ini stale notification dari ronde sebelumnya —
-    // abaikan. Tanpa guard ini, notifikasi lama bisa mengisi cur.winner
-    // dan mengunci kartu ronde baru sebelum pemain sempat klik.
     if (winner.round !== cur.number) {
       console.warn('[multi] stale winner di watcher → diabaikan:', winner, 'current round:', cur.number);
       return;
@@ -913,10 +938,6 @@ function renderRound(round) {
 
 function onRoundWon(round) {
   // ✅ FIX D: guard defensive — jangan disable kartu kalau bukan ronde aktif.
-  // onRoundWon bisa dipanggil dari fetch (round === playerState.currentRound)
-  // atau dari winner watcher ({...cur, winner}). Kalau currentRound sudah
-  // berubah (Promise resolve terlambat setelah ronde baru render), jangan
-  // sentuh kartu ronde baru.
   const cur = playerState.currentRound;
   if (!cur || cur.number !== round.number) {
     console.warn('[multi] onRoundWon untuk ronde', round.number, 'diabaikan (current:', cur?.number, ')');
@@ -970,8 +991,6 @@ async function onCardClick(cardId, btnEl) {
       round.winner = { uid: myUid, cardId, round: round.number };
 
       // ✅ FIX C: hanya disable kartu kalau ronde ini MASIH aktif.
-      // Kalau transaksi resolve terlambat (setelah ronde berikutnya render),
-      // jangan sentuh kartu ronde baru.
       if (playerState.currentRound?.number === round.number) {
         document.querySelectorAll('#field .card').forEach(el => {
           el.style.pointerEvents = 'none';
@@ -985,7 +1004,7 @@ async function onCardClick(cardId, btnEl) {
       toast('Terlambat!', 'bad');
     }
   } catch (err) {
-    // Fix 5: surface error.
+    // Fix 5: surface error + pesan yang membedakan kartu salah vs ronde berakhir.
     btnEl.classList.add('wrong');
     setTimeout(() => btnEl.classList.remove('wrong'), 500);
 
@@ -1051,6 +1070,8 @@ export function initPlayer(opts = {}) {
   };
 
   function ensureLeaveButtons() {
+    // Lobby: tombol "Keluar Room" dibuat dinamis karena hanya muncul di
+    // screen-multi-lobby (khusus multiplayer, tidak ada di solo).
     const lobbyScreen = document.getElementById('screen-multi-lobby');
     if (lobbyScreen && !document.getElementById('btnLeaveRoom')) {
       const wrapEl = document.createElement('div');
@@ -1071,21 +1092,18 @@ export function initPlayer(opts = {}) {
       (lobbyScreen.querySelector('.wrap') || lobbyScreen).appendChild(wrapEl);
     }
 
-    const gameScreen = document.getElementById('screen-game');
-    if (gameScreen && !document.getElementById('btnLeaveGame')) {
-      const fab = document.createElement('button');
-      fab.id = 'btnLeaveGame';
-      fab.type = 'button';
-      fab.className = 'btn btn-leave-fab';
-      fab.textContent = 'Keluar';
-      fab.addEventListener('click', async () => {
+    // Game: tombol #btnLeaveGame SUDAH ada di play.html.
+    // Tinggal wire handler-nya (sekali saja via dataset flag).
+    const gameBtn = document.getElementById('btnLeaveGame');
+    if (gameBtn && gameBtn.dataset.wired !== '1') {
+      gameBtn.dataset.wired = '1';
+      gameBtn.addEventListener('click', async () => {
         if (!playerState.code) return;
         if (!confirm('Keluar dari room ini? Permainan tetap berjalan.')) return;
-        fab.disabled = true;
+        gameBtn.disabled = true;
         try { await playerLeaveRoom(); }
-        finally { fab.disabled = false; }
+        finally { gameBtn.disabled = false; }
       });
-      gameScreen.appendChild(fab);
     }
   }
 
@@ -1305,6 +1323,23 @@ export function initHost() {
       await hostPlayAgain();
     } catch (err) {
       toast(err.message || 'Gagal reset', 'bad');
+    }
+  });
+
+  // ✅ NEW: tombol "Akhiri Permainan" di layar game.
+  // Tombol "Bubar" (btnDisbandGame) otomatis ter-wire oleh handler
+  // [data-disband] yang sudah ada di bawah.
+  $('btnFinishGame')?.addEventListener('click', async () => {
+    if (!hostState.code) return;
+    if (hostState.finished) return;
+    if (!confirm('Akhiri permainan sekarang? Skor saat ini akan menjadi hasil akhir.')) return;
+    const btn = $('btnFinishGame');
+    btn.disabled = true;
+    try {
+      await finishHostGame();
+    } catch (err) {
+      toast(err.message || 'Gagal mengakhiri permainan', 'bad');
+      btn.disabled = false;
     }
   });
 
