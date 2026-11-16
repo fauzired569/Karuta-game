@@ -331,6 +331,9 @@ function endGame() {
 function onFieldClick(e) {
   const btn = e.target.closest('.card');
   if (!btn) return;
+  // ✅ NEW: guard kalau user sudah keluar (state.running=false) —
+  // cegah klik kartu sisa DOM setelah exit.
+  if (!state.running) return;
   const round = state.round;
   if (!round || round.done) return;
   if (btn.style.pointerEvents === 'none') return;
@@ -376,6 +379,17 @@ function wireControls() {
   });
 
   document.getElementById('field')?.addEventListener('click', onFieldClick);
+
+  // ✅ NEW: tombol "Keluar" di layar game solo.
+  // Membatalkan semua timer, kembali ke setup tanpa menghapus pilihan buku/bab.
+  document.getElementById('btnLeaveGame')?.addEventListener('click', () => {
+    if (!state.running) return;
+    if (!confirm('Keluar dari permainan? Skor saat ini akan hilang.')) return;
+    state.running = false;
+    state.round = null;
+    clearTimers();
+    showScreen('screen-setup');
+  });
 
   document.getElementById('btnAgain')?.addEventListener('click', () => {
     // Pool yang sama, skor & used di-reset di startGame
