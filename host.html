@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/anti-cheat.css">
 </head>
 <body>
 
@@ -63,7 +64,7 @@
     </div>
   </section>
 
-    <!-- ============ GAME ============ -->
+  <!-- ============ GAME ============ -->
   <section id="screen-host-game" class="screen">
     <div class="hud">
       <div class="referee">
@@ -79,10 +80,12 @@
     <div class="host-status" id="hostStatus">Pilih kanji untuk jadi soal…</div>
     <div class="kanji-picker" id="kanjiPicker"></div>
 
-    <!-- ✅ NEW: kontrol host saat game berlangsung.
-         Kedua tombol bersifat FAB (fixed bottom-right) agar tidak
-         mengganggu layout picker yang scrollable. -->
     <div class="host-game-actions">
+      <!-- NEW: tombol review (hidden kalau belum ada flag) -->
+      <button class="btn btn-warn" id="btnReviewFlags" type="button" hidden
+              title="Tinjau laporan aktivitas mencurigakan">
+        ⚠ Review <span id="flagCount">0</span>
+      </button>
       <button class="btn" id="btnFinishGame" type="button"
               title="Akhiri permainan dan tampilkan hasil akhir">🏁 Akhiri</button>
       <button class="btn btn-danger" id="btnDisbandGame" type="button"
@@ -107,6 +110,15 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- NEW: dialog review flag -->
+<dialog id="reviewDialog" class="review-dialog">
+  <h3>⚠ Laporan Aktivitas Mencurigakan</h3>
+  <div id="reviewContent"><p class="hint">Belum ada data.</p></div>
+  <div class="review-actions">
+    <button class="btn" id="btnCloseReview" type="button">Tutup</button>
+  </div>
+</dialog>
 
 <script type="module">
   import { initHost } from './js/multi.js';
