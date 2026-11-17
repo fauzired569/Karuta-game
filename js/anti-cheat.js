@@ -2,6 +2,13 @@
 // Deteksi aktivitas mencurigakan selama permainan (tab-hidden, copy,
 // context menu, shortcut DevTools, dll). Murni client-side — hanya deterrent.
 // Flag dikirim ke Firebase untuk ditinjau HOST (bukan auto-kick).
+//
+// Changelog vs versi sebelumnya:
+//   [~] onKeyDown: tambah !shift pada shortcut p/s/u (hindari false positive
+//       Ctrl+Shift+P/S/U yang di browser = Save-As / Print preview / dll)
+//   [~] onBlur: skip jika visibilityState === 'hidden' — sudah di-handle
+//       tab_hidden, cegah double-flag saat switch tab
+//   [+] onDragStart: cegah drag prompt ke aplikasi luar (deterrent tambahan)
 
 export function createAntiCheat({ onFlag, getContext, isRoundActive }) {
   let active = false;
@@ -51,19 +58,33 @@ export function createAntiCheat({ onFlag, getContext, isRoundActive }) {
   function onVisibility() {
     if (document.visibilityState === 'hidden') fire('tab_hidden');
   }
-  function onBlur() { fire('window_blur'); }
+
+  function onBlur() {
+    // FIX: skip jika tab sudah/akan hidden — kasus ini sudah dilaporkan
+    // sebagai 'tab_hidden'. Tanpa cek ini, satu kali switch tab bisa
+    // memicu dua flag (tab_hidden + window_blur).
+    //
+    // window_blur yang tersisa = user masih di tab sama tapi window
+    // kehilangan focus: klik address bar, dialog OS, file picker, alert, dll.
+    // Tetap dilaporkan untuk review host (bukan serious flag di multi.js).
+    if (document.visibilityState === 'hidden') return;
+    fire('window_blur');
+  }
+
   function onContextMenu(e) {
     if (inPrompt(e.target)) {
       e.preventDefault();
       fire('context_menu');
     }
   }
+
   function onCopyCut(e) {
     if (inPrompt(e.target) || selectionInPrompt()) {
       e.preventDefault?.();
       fire(e.type === 'copy' ? 'copy_attempt' : 'cut_attempt');
     }
   }
+
   function onKeyDown(e) {
     const k = (e.key || '').toLowerCase();
     const mod = e.ctrlKey || e.metaKey;
@@ -74,14 +95,27 @@ export function createAntiCheat({ onFlag, getContext, isRoundActive }) {
     if (mod && !shift && ['c', 'x', 'a'].includes(k) && focusInPrompt) {
       fire('shortcut_' + k + '_in_prompt');
     }
-    // Shortcut mencetak / view-source
-    if (mod && ['p', 's', 'u'].includes(k)) fire('shortcut_' + k);
+    // FIX: !shift ditambahkan. Ctrl+Shift+P/S/U di browser biasanya
+    // Save-As / Print-preview / View-source-advanced — bukan sekadar
+    // "print/save/view-source" biasa. Tanpa guard ini, kombinasi tersebut
+    // (dan Ctrl+Shift+P di VSCode / VSCode Web) memicu false positive.
+    if (mod && !shift && ['p', 's', 'u'].includes(k)) fire('shortcut_' + k);
     // DevTools
     if (e.key === 'F12') fire('devtools_f12');
     if (mod && shift && ['i', 'j', 'c'].includes(k)) fire('devtools_shortcut');
   }
+
   function onSelectStart(e) {
     if (inPrompt(e.target)) fire('select_attempt');
+  }
+
+  // NEW: cegah drag teks prompt ke aplikasi luar (notepad, chat, dll).
+  // Ini jalan sebelum copy event, jadi deterrent tambahan.
+  function onDragStart(e) {
+    if (inPrompt(e.target)) {
+      e.preventDefault?.();
+      fire('drag_attempt');
+    }
   }
 
   function attach(target, ev, fn, opts) {
@@ -100,6 +134,7 @@ export function createAntiCheat({ onFlag, getContext, isRoundActive }) {
       attach(document, 'cut', onCopyCut);
       attach(document, 'keydown', onKeyDown);
       attach(document, 'selectstart', onSelectStart);
+      attach(document, 'dragstart', onDragStart);
     },
     stop() {
       if (!active) return;
