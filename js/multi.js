@@ -1,7 +1,18 @@
 // multi.js — Logika multiplayer: host (wasit) + player, Firebase RTDB v9 modular
+//
+// Changelog vs versi sebelumnya:
+//   [+] Anti-cheat integration via './anti-cheat.js' (tab-hidden, copy, dll)
+//   [+] Session reconnect via sessionStorage (auto-rejoin setelah refresh)
+//   [+] Flag reporting per-round (ditinjau HOST, bukan auto-kick)
+//   [+] Winner race + expired handling (no false "wrong" flash)
+//   [+] Per-player field shuffle (anti-collusion posisi)
+//   [~] Rekonstruksi: onCardClick, playerWatchRound, playerShowResult,
+//       playerShowLobby, initPlayer, initHost
+
 import { firebaseConfig } from './firebase-config.js';
 import { KANJI, STRUCTURE } from './data.js';
 import { buildPool } from './core.js';
+import { createAntiCheat } from './anti-cheat.js';
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import {
@@ -21,7 +32,10 @@ const MIN_POOL           = 8;
 const ROUND_TIMEOUT_MS   = 15000;
 const NEXT_ROUND_DELAY   = 2500;
 const ROOM_CODE_LEN      = 4;
-const ROOM_CODE_CHARS    = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // hindari 0/O/1/I
+const ROOM_CODE_CHARS    = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+const SESSION_KEY        = 'karuta_session_v1';
+const SESSION_TTL_MS     = 6 * 60 * 60 * 1000; // 6 jam
 
 // =========================================================
 // Firebase singleton
@@ -92,8 +106,20 @@ function showScreen(id) {
   });
 }
 
+// Coba beberapa ID screen (fallback kalau play.html beda dengan yang diasumsikan).
+// VERIFY: sesuaikan daftar ID di bawah dengan struktur play.html-mu.
+function showFirstExistingScreen(...ids) {
+  for (const id of ids) {
+    if (document.getElementById(id)) {
+      showScreen(id);
+      return true;
+    }
+  }
+  return false;
+}
+
 // =========================================================
-// Reading lookup yang toleran terhadap variasi field di data.js
+// Reading lookup toleran variasi field di data.js
 // =========================================================
 function getReading(card) {
   if (!card) return '';
@@ -112,7 +138,7 @@ function getReading(card) {
 }
 
 // =========================================================
-// Prompt rendering (hiragana + arti)
+// Prompt / Score / Field rendering
 // =========================================================
 function renderPrompt(el, reading, meaning) {
   if (!el) return;
@@ -125,33 +151,39 @@ function renderPrompt(el, reading, meaning) {
   el.classList.add('pop');
 }
 
-// =========================================================
-// Score rendering
-// =========================================================
-function renderScores(el, players, myUidArg) {
+function renderScores(el, players, myUidArg, flags = {}) {
   if (!el) return;
   const list = Object.entries(players || {})
     .filter(([_, p]) => !p.isHost)
     .sort((a, b) => (b[1].score || 0) - (a[1].score || 0));
 
-  el.innerHTML = list.map(([id, p]) => `
-    <div class="chip ${id === myUidArg ? 'you' : ''}">
-      <span class="cname">${escHtml(p.name || '?')}</span>
-      <span class="cpts">${p.score || 0}</span>
-    </div>
-  `).join('');
+  el.innerHTML = list.map(([id, p]) => {
+    const f = flags[id] || {};
+    const count = Object.keys(f).length;
+    const warn = count > 0
+      ? `<span class="warn-badge" title="Aktivitas mencurigakan terdeteksi">⚠ ${count}</span>`
+      : '';
+    return `
+      <div class="chip ${id === myUidArg ? 'you' : ''} ${count > 0 ? 'suspicious' : ''}">
+        <span class="cname">${escHtml(p.name || '?')}${warn}</span>
+        <span class="cpts">${p.score || 0}</span>
+      </div>
+    `;
+  }).join('');
 }
 
-// =========================================================
-// Field rendering
-// =========================================================
 function renderField(fieldEl, cardIds) {
   if (!fieldEl) {
     console.warn('renderField: field element not found');
     return;
   }
   fieldEl.innerHTML = '';
-  (cardIds || []).forEach((id, i) => {
+
+  // Per-player shuffle: tiap pemain melihat posisi yang berbeda.
+  // Mencegah kolusi posisi & memberi sedikit variasi visual.
+  const ordered = shuffle(cardIds || []);
+
+  ordered.forEach((id, i) => {
     const card = KANJI.find(k => k.id === id);
     if (!card) return;
     const btn = document.createElement('button');
@@ -164,6 +196,47 @@ function renderField(fieldEl, cardIds) {
     btn.innerHTML = `<span class="kanji">${escHtml(card.kanji)}</span>`;
     fieldEl.appendChild(btn);
   });
+}
+
+// =========================================================
+// Session (auto-reconnect)
+// =========================================================
+function saveSession() {
+  if (!playerState.code || !playerState.name) return;
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+      code: playerState.code,
+      name: playerState.name,
+      savedAt: Date.now(),
+    }));
+  } catch {}
+}
+
+function clearSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch {}
+}
+
+function readSession() {
+  try {
+    return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+  } catch { return null; }
+}
+
+// =========================================================
+// Flag reporting (ditinjau host, BUKAN auto-kick)
+// =========================================================
+function reportPlayerFlag(type, extra = {}) {
+  const code = playerState.code;
+  const uid  = playerState.uid;
+  if (!code || !uid) return;
+  const round = Number(extra.round) || playerState.currentRound?.number || 0;
+  const key = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  set(ref(db, `rooms/${code}/flags/${uid}/${key}`), {
+    type: String(type).slice(0, 64),
+    round,
+    at: Date.now(),
+  }).catch(err => console.warn('flag write failed:', err));
 }
 
 // =========================================================
@@ -181,11 +254,13 @@ let hostState = {
   unsubPlayers: null,
   unsubRound: null,
   unsubMeta: null,
-  finished: false   // ✅ NEW: guard agar "Akhiri" tidak dobel-finish
+  unsubFlags: null,
+  flags: {},
+  playersCache: {},
+  finished: false,
 };
 
-// Callback render lobby disimpan module-level supaya hostPlayAgain()
-// bisa re-attach listener saat kembali ke lobby setelah game selesai.
+// Callback render lobby disimpan module-level agar hostPlayAgain bisa re-attach.
 let hostLobbyRenderFn = null;
 
 async function hostCreateRoom(selectedIds, maxPlayers = 8) {
@@ -236,10 +311,13 @@ function clearHostState() {
   if (hostState.unsubPlayers) hostState.unsubPlayers();
   if (hostState.unsubRound)   hostState.unsubRound();
   if (hostState.unsubMeta)    hostState.unsubMeta();
-  hostState.unsubPlayers = hostState.unsubRound = hostState.unsubMeta = null;
+  if (hostState.unsubFlags)   hostState.unsubFlags();
+  hostState.unsubPlayers = hostState.unsubRound = hostState.unsubMeta = hostState.unsubFlags = null;
+  hostState.flags = {};
+  hostState.playersCache = {};
   hostState.used = new Set();
   hostState.roundNumber = 0;
-  hostState.finished = false;   // ✅ NEW
+  hostState.finished = false;
 }
 
 function hostWatchLobby(onUpdate) {
@@ -258,7 +336,7 @@ async function hostStartGame() {
   const code = hostState.code;
   if (!code) return;
 
-  hostState.finished = false;   // ✅ NEW: reset saat game baru mulai
+  hostState.finished = false;
 
   await update(ref(db, `rooms/${code}/meta`), {
     status: 'playing',
@@ -267,6 +345,8 @@ async function hostStartGame() {
 
   hostState.used = new Set();
   hostState.roundNumber = 0;
+  hostState.flags = {};
+  hostState.playersCache = {};
 
   showScreen('screen-host-game');
 
@@ -278,7 +358,20 @@ async function hostStartGame() {
   }
   hostState.unsubPlayers = onValue(ref(db, `rooms/${code}/players`), (snap) => {
     const players = snap.val() || {};
-    renderScores(document.getElementById('hostScores'), players, hostState.uid);
+    hostState.playersCache = players;
+    renderScores(document.getElementById('hostScores'), players, hostState.uid, hostState.flags);
+    renderHostFlags();
+  });
+
+  // Flags listener untuk review host
+  if (hostState.unsubFlags) {
+    hostState.unsubFlags();
+    hostState.unsubFlags = null;
+  }
+  hostState.unsubFlags = onValue(ref(db, `rooms/${code}/flags`), (snap) => {
+    hostState.flags = snap.val() || {};
+    renderScores(document.getElementById('hostScores'), hostState.playersCache, hostState.uid, hostState.flags);
+    renderHostFlags();
   });
 
   if (hostState.unsubRound) {
@@ -288,8 +381,6 @@ async function hostStartGame() {
 
   // Winner listener (satu listener untuk semua ronde)
   hostState.unsubRound = onValue(ref(db, `rooms/${code}/currentRound`), async (snap) => {
-    // ✅ NEW: kalau host sudah menekan "Akhiri", abaikan semua notifikasi
-    // winner yang telat masuk.
     if (hostState.finished) return;
 
     const data = snap.val();
@@ -307,6 +398,25 @@ async function hostStartGame() {
     if (!res.committed) return;
 
     clearTimeout(hostState.roundTimer);
+
+    // Cek flag: apakah pemenang terdeteksi mencurangi ronde ini?
+    const flagsSnap = await get(ref(db, `rooms/${code}/flags/${winnerUid}`));
+    const flags = flagsSnap.val() || {};
+    const suspicious = Object.values(flags).some(
+      f => f.round === hostState.roundNumber &&
+           (f.type === 'tab_hidden' || f.type === 'window_blur')
+    );
+
+    if (suspicious) {
+      const wsnap = await get(ref(db, `rooms/${code}/players/${winnerUid}`));
+      const wname = wsnap.val()?.name || '?';
+      const statusEl = document.getElementById('hostStatus');
+      if (statusEl) statusEl.textContent =
+        `⚠ ${wname} terdeteksi pindah tab — poin ronde ini tidak sah.`;
+      await delay(NEXT_ROUND_DELAY);
+      hostReadyForNextPick();
+      return;
+    }
 
     // Guard: pemenang bisa saja sudah keluar/ditendang
     const stillThere = (await get(ref(db, `rooms/${code}/players/${winnerUid}`))).exists();
@@ -361,7 +471,6 @@ function renderKanjiPicker() {
 }
 
 function hostReadyForNextPick() {
-  // ✅ NEW: kalau host sudah mengakhiri game, jangan render picker / prompt lagi.
   if (hostState.finished) return;
 
   renderPrompt(document.getElementById('hostMeaning'), '', 'Pilih kanji di bawah…');
@@ -383,7 +492,7 @@ async function hostPickKanji(cardId) {
   if (!code) return;
   if (hostState.used.has(cardId)) return;
   if (!hostState.pool.includes(cardId)) return;
-  if (hostState.finished) return;   // ✅ NEW: cegah pilih kanji setelah game selesai
+  if (hostState.finished) return;
 
   clearTimeout(hostState.roundTimer);
 
@@ -399,12 +508,10 @@ async function hostPickKanji(cardId) {
   const distract  = shuffle(others).slice(0, Math.max(0, fieldSize - 1));
   const cards     = shuffle([cardId, ...distract]);
 
-  // Update HUD host (sync)
   renderPrompt(document.getElementById('hostMeaning'), targetReading, targetMeaning);
   const remainEl = document.getElementById('hostRemainTag');
   if (remainEl) remainEl.innerHTML = `SISA<br>${hostState.pool.length - hostState.used.size}`;
 
-  // Kosongkan picker segera (cegah double-click)
   const pickerEl = document.getElementById('kanjiPicker');
   if (pickerEl) pickerEl.innerHTML = '';
 
@@ -450,7 +557,6 @@ async function finishHostGame() {
   const code = hostState.code;
   if (!code) return;
 
-  // ✅ NEW: idempoten. Kalau sudah finished, cukup tampilkan hasil.
   if (hostState.finished) {
     await showHostResult();
     return;
@@ -459,12 +565,10 @@ async function finishHostGame() {
 
   clearTimeout(hostState.roundTimer);
 
-  // Lepas listener ronde (host tidak lagi memantau winner).
   if (hostState.unsubRound) {
     hostState.unsubRound();
     hostState.unsubRound = null;
   }
-  // Lepas listener skor game — tidak diperlukan di layar hasil.
   if (hostState.unsubPlayers) {
     hostState.unsubPlayers();
     hostState.unsubPlayers = null;
@@ -499,17 +603,19 @@ async function hostPlayAgain() {
   const code = hostState.code;
   if (!code) return;
   clearTimeout(hostState.roundTimer);
-  hostState.finished = false;   // ✅ NEW: siap untuk game berikutnya
+  hostState.finished = false;
 
-  // Lepas listener skor game.
   if (hostState.unsubPlayers) {
     hostState.unsubPlayers();
     hostState.unsubPlayers = null;
   }
-
   if (hostState.unsubRound) {
     hostState.unsubRound();
     hostState.unsubRound = null;
+  }
+  if (hostState.unsubFlags) {
+    hostState.unsubFlags();
+    hostState.unsubFlags = null;
   }
 
   const playersSnap = await get(ref(db, `rooms/${code}/players`));
@@ -519,11 +625,14 @@ async function hostPlayAgain() {
   Object.keys(players).forEach(pid => { updates[`players/${pid}/score`] = 0; });
   updates['meta/status'] = 'lobby';
   updates['currentRound'] = null;
+  updates['flags'] = null;   // reset audit trail untuk game baru
 
   await update(ref(db, `rooms/${code}`), updates);
 
   hostState.used = new Set();
   hostState.roundNumber = 0;
+  hostState.flags = {};
+  hostState.playersCache = {};
 
   const poolSection = document.getElementById('poolSection');
   if (poolSection) poolSection.hidden = false;
@@ -535,7 +644,6 @@ async function hostPlayAgain() {
 
   showScreen('screen-host-lobby');
 
-  // Re-attach listener lobby.
   if (hostLobbyRenderFn) {
     hostWatchLobby(hostLobbyRenderFn);
   }
@@ -576,6 +684,47 @@ async function hostKickPlayer(targetUid) {
   await remove(ref(db, `rooms/${code}/players/${targetUid}`));
 }
 
+// -------- HOST: render dialog review flags --------
+
+function renderHostFlags() {
+  const dialog  = document.getElementById('reviewDialog');
+  const content = document.getElementById('reviewContent');
+  const btn     = document.getElementById('btnReviewFlags');
+  const countEl = document.getElementById('flagCount');
+  if (!dialog || !content || !btn || !countEl) return;
+
+  const flags   = hostState.flags || {};
+  const players = hostState.playersCache || {};
+
+  let total = 0;
+  const rows = [];
+  for (const [uid, pl] of Object.entries(players)) {
+    if (pl.isHost) continue;
+    const f = flags[uid] || {};
+    const entries = Object.values(f);
+    if (!entries.length) continue;
+    total += entries.length;
+    const byType = entries.reduce((a, e) => {
+      a[e.type] = (a[e.type] || 0) + 1;
+      return a;
+    }, {});
+    const list = Object.entries(byType)
+      .map(([t, n]) => `${escHtml(t)} ×${n}`)
+      .join('<br>');
+    rows.push(`<div class="flag-row">
+      <div class="fr-name">${escHtml(pl.name || '?')}</div>
+      <div class="fr-detail">${list}</div>
+    </div>`);
+  }
+
+  countEl.textContent = total;
+  btn.hidden = total === 0;
+
+  content.innerHTML = rows.length
+    ? rows.join('')
+    : '<p class="hint">Belum ada aktivitas mencurigakan.</p>';
+}
+
 // =========================================================
 // =========================================================
 // PLAYER
@@ -595,7 +744,8 @@ let playerState = {
   unsubRoundWinner: null,
   unsubHostOnline: null,
   hostUid: null,
-  _roundToken: 0
+  _roundToken: 0,
+  antiCheat: null,
 };
 
 async function playerJoinRoom(code, playerName) {
@@ -638,6 +788,8 @@ async function playerJoinRoom(code, playerName) {
   playerState.name = playerName;
   playerState.hostUid = meta.hostUid;
 
+  saveSession();   // untuk auto-reconnect saat refresh
+
   return { meta, players };
 }
 
@@ -658,6 +810,7 @@ function playerExit(reason) {
   const uid  = playerState.uid;
   if (playerState.leaving) return;
   playerState.leaving = true;
+  clearSession();
 
   playerState.unsubSelf?.();   playerState.unsubSelf = null;
   playerState.unsubMeta?.();   playerState.unsubMeta = null;
@@ -696,6 +849,7 @@ async function playerLeaveRoom({ silent = false } = {}) {
   if (playerState.leaving) return;
 
   playerState.leaving = true;
+  clearSession();
   playerState.unsubSelf?.();   playerState.unsubSelf = null;
   playerState.unsubMeta?.();   playerState.unsubMeta = null;
   playerState.unsubLobby?.();  playerState.unsubLobby = null;
@@ -746,6 +900,9 @@ function playerWatchSelf() {
 }
 
 function cleanupPlayerGameListeners() {
+  playerState.antiCheat?.stop();
+  playerState.antiCheat = null;
+
   playerState.unsubRoundNumber?.();
   playerState.unsubRoundNumber = null;
   playerState.unsubRoundWinner?.();
@@ -791,6 +948,16 @@ function playerBeginGame() {
   showScreen('screen-game');
   cleanupPlayerGameListeners();
 
+  // Anti-cheat: aktif selama gameplay
+  if (!playerState.antiCheat) {
+    playerState.antiCheat = createAntiCheat({
+      onFlag: (type, extra) => reportPlayerFlag(type, extra),
+      getContext: () => ({ round: playerState.currentRound?.number || 0 }),
+      isRoundActive: () => !!playerState.currentRound,
+    });
+  }
+  playerState.antiCheat.start();
+
   // Reset UI ke placeholder
   const meaningEl = document.getElementById('meaning');
   if (meaningEl) {
@@ -814,571 +981,510 @@ function playerBeginGame() {
     });
   }
 
-  // Skor live
-  playerState.unsubPlayers = onValue(ref(db, `rooms/${code}/players`), (snap) => {
-    const players = snap.val() || {};
-    renderScores(document.getElementById('scores'), players, myUid);
-  });
+  // Subscribe ke currentRound
+  playerWatchRound();
+}
 
-  // Watcher nomor ronde → fetch dengan token & pending state
-  playerState.unsubRoundNumber = onValue(ref(db, `rooms/${code}/currentRound/number`), async (snap) => {
-    const number = snap.val();
-    if (!number) return;
-    if (playerState.currentRound?.number === number && !playerState.currentRound?.pending) return;
+// -------- FASE MAIN (player) --------
 
-    const token = ++playerState._roundToken;
+function playerWatchRound() {
+  const code = playerState.code;
+  if (!code) return;
 
-    // Kunci klik selama fetch (pending, winner='pending' → truthy)
-    playerState.currentRound = {
-      number, cards: [], winner: 'pending',
-      targetMeaning: '…', targetReading: '', pending: true
-    };
+  if (playerState.unsubRoundNumber) {
+    playerState.unsubRoundNumber();
+    playerState.unsubRoundNumber = null;
+  }
 
-    const [cardsSnap, remainingSnap, winnerSnap, meaningSnap, readingSnap] = await Promise.all([
-      get(ref(db, `rooms/${code}/currentRound/cards`)).catch(() => null),
-      get(ref(db, `rooms/${code}/currentRound/remaining`)).catch(() => null),
-      get(ref(db, `rooms/${code}/currentRound/winner`)).catch(() => null),
-      get(ref(db, `rooms/${code}/currentRound/targetMeaning`)).catch(() => null),
-      get(ref(db, `rooms/${code}/currentRound/targetReading`)).catch(() => null)
-    ]);
+  playerState.unsubRoundNumber = onValue(ref(db, `rooms/${code}/currentRound`), (snap) => {
+    const data = snap.val();
+    const meaningEl = document.getElementById('meaning');
+    const fieldEl   = document.getElementById('field');
+    const remainEl  = document.getElementById('remainTag');
 
-    // Tolak kalau ada fetch lebih baru (out-of-order)
-    if (token !== playerState._roundToken) return;
-
-    // ✅ FIX B: get(winner) bisa mengembalikan nilai cache yang masih
-    // menyimpan winner ronde sebelumnya. Validasi round-nya sebelum dipakai.
-    const rawWinner = winnerSnap?.val();
-    const validWinner = (rawWinner && rawWinner.round === number) ? rawWinner : null;
-    if (rawWinner && !validWinner) {
-      console.warn('[multi] stale winner di fetch ronde', number, '→ diabaikan:', rawWinner);
-    }
-
-    const data = {
-      number,
-      cards: cardsSnap?.val() || [],
-      remaining: remainingSnap?.val() || 0,
-      winner: validWinner,
-      targetMeaning: meaningSnap?.val() || '?',
-      targetReading: readingSnap?.val() || '',
-      pending: false
-    };
-    playerState.currentRound = data;
-    renderRound(data);
-    if (validWinner) onRoundWon(data);
-  });
-
-  // Winner watcher — abaikan jika pending / sudah ada winner / stale round
-  playerState.unsubRoundWinner = onValue(ref(db, `rooms/${code}/currentRound/winner`), (snap) => {
-    const winner = snap.val();
-    if (!winner) return;
-    const cur = playerState.currentRound;
-    if (!cur || cur.pending) return;
-    if (cur.winner) return;
-
-    // ✅ FIX A: winner.round harus cocok dengan cur.number.
-    if (winner.round !== cur.number) {
-      console.warn('[multi] stale winner di watcher → diabaikan:', winner, 'current round:', cur.number);
+    if (!data || !data.number) {
+      playerState.currentRound = null;
+      if (meaningEl) meaningEl.innerHTML =
+        '<span class="prompt-meaning">Menunggu wasit memilih soal…</span>';
+      if (fieldEl) fieldEl.innerHTML = '';
+      if (remainEl) remainEl.innerHTML = 'SISA<br>–';
       return;
     }
 
-    cur.winner = winner;
-    onRoundWon({ ...cur, winner });
-  });
+    const isNewRound = !playerState.currentRound ||
+                       playerState.currentRound.number !== data.number;
+    playerState.currentRound = data;
 
-  // Host online watcher
-  playerState.unsubHostOnline = onValue(
-    ref(db, `rooms/${code}/players/${playerState.hostUid}/online`),
-    (snap) => {
-      if (snap.val() === false) toast('Wasit terputus...', 'bad');
+    if (isNewRound) {
+      // Render prompt + field
+      renderPrompt(meaningEl, data.targetReading || '', data.targetMeaning || '?');
+      if (remainEl) remainEl.innerHTML = `SISA<br>${data.remaining ?? '–'}`;
+      if (fieldEl) {
+        fieldEl.innerHTML = '';
+        renderField(fieldEl, data.cards || []);
+      }
     }
-  );
+
+    // Tampilkan state ronde (winner / expired) — disabled semua kartu
+    if (fieldEl) {
+      const cards = fieldEl.querySelectorAll('.card');
+
+      if (data.winner) {
+        cards.forEach(c => {
+          c.disabled = true;
+          if (c.dataset.id === data.winner.cardId) c.classList.add('correct');
+        });
+      } else if (data.expired) {
+        cards.forEach(c => { c.disabled = true; });
+      } else {
+        // Reset (misal karena transisi round lama → baru)
+        cards.forEach(c => {
+          c.disabled = false;
+          c.classList.remove('correct', 'wrong');
+        });
+      }
+    }
+  });
 }
 
-async function showPlayerResult() {
+async function onCardClick(cardId, btn) {
   const code = playerState.code;
+  if (!code) return;
+
+  const round = playerState.currentRound;
+  if (!round || !round.number) return;
+  if (round.winner || round.expired) return;
+  if (btn.disabled) return;
+  if (btn.dataset.submitting === '1') return;
+
+  btn.dataset.submitting = '1';
+
+  try {
+    // Coba tulis winner. Berhasil HANYA jika cardId === targetId (dicek rules).
+    await set(ref(db, `rooms/${code}/currentRound/winner`), {
+      uid: playerState.uid,
+      cardId,
+      round: round.number,
+    });
+    // Berhasil: beri feedback, listener akan disable field
+    btn.classList.add('correct');
+  } catch (err) {
+    // Gagal: bisa karena (a) kartu salah, (b) sudah ada pemenang lain,
+    // (c) sudah expired, (d) round sudah berubah.
+    // Bedakan supaya tidak salah tampilkan "salah" untuk kartu yang benar.
+    try {
+      const [winnerSnap, expiredSnap, curSnap] = await Promise.all([
+        get(ref(db, `rooms/${code}/currentRound/winner`)),
+        get(ref(db, `rooms/${code}/currentRound/expired`)),
+        get(ref(db, `rooms/${code}/currentRound`)),
+      ]);
+
+      const cur = curSnap.val();
+      const stillSameRound = cur && cur.number === round.number;
+      const alreadyDecided = winnerSnap.exists() ||
+                             expiredSnap.val() === true ||
+                             !stillSameRound;
+
+      if (!alreadyDecided) {
+        // Benar-benar kartu salah — beri feedback "wrong"
+        btn.classList.add('wrong');
+        btn.disabled = true;
+        setTimeout(() => {
+          btn.classList.remove('wrong');
+          // Jangan re-enable jika ronde sudah selesai
+          const r = playerState.currentRound;
+          if (r && r.number === round.number && !r.winner && !r.expired) {
+            btn.disabled = false;
+          }
+        }, 600);
+      }
+      // else: diam — listener yang akan update UI (correct highlight / disable)
+    } catch (e) {
+      console.warn('post-click check failed:', e);
+    }
+  } finally {
+    delete btn.dataset.submitting;
+  }
+}
+
+// -------- RESULT & LOBBY (player) --------
+
+async function playerShowResult() {
+  const code = playerState.code;
+  if (!code) return;
+
+  // Lepas listener game dulu
+  cleanupPlayerGameListeners();
+
   const snap = await get(ref(db, `rooms/${code}/players`));
   const players = snap.val() || {};
   const list = Object.entries(players)
     .filter(([_, p]) => !p.isHost)
     .sort((a, b) => (b[1].score || 0) - (a[1].score || 0));
 
-  const el = document.getElementById('resultList');
-  if (el) {
-    el.innerHTML = list.map(([id, p], i) => `
-      <div class="rank-row ${id === myUid ? 'you' : ''}">
-        <div class="rank">${i + 1}</div>
-        <div class="rname">${escHtml(p.name || '?')}</div>
-        <div class="rpts">${p.score || 0}</div>
-      </div>
-    `).join('');
+  // Render ke beberapa target umum (defensif)
+  // VERIFY: sesuaikan dengan ID di play.html-mu.
+  const targets = ['playerResultList', 'resultList', 'multiResultList'];
+  let rendered = false;
+  for (const id of targets) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.innerHTML = list.map(([pid, p], i) => {
+      const you = pid === playerState.uid ? ' you' : '';
+      return `
+        <div class="rank-row${you}">
+          <div class="rank">${i + 1}</div>
+          <div class="rname">${escHtml(p.name || '?')}</div>
+          <div class="rpts">${p.score || 0}</div>
+        </div>
+      `;
+    }).join('');
+    rendered = true;
   }
-  showScreen('screen-result');
+  if (!rendered) console.warn('playerShowResult: no result list element found');
+
+  // VERIFY: sesuaikan dengan ID screen di play.html-mu.
+  showFirstExistingScreen('screen-result', 'screen-player-result', 'screen-game-result');
 }
 
-function renderRound(round) {
-  if (!round || !Array.isArray(round.cards)) {
-    console.warn('renderRound: data ronde tidak valid', round);
-    return;
-  }
+function playerShowLobby() {
+  const code = playerState.code;
+  if (!code) return;
 
-  renderPrompt(
-    document.getElementById('meaning'),
-    round.targetReading,
-    round.targetMeaning
-  );
+  // Render daftar pemain (defensif, multi-ID)
+  // VERIFY: sesuaikan ID di bawah dengan play.html-mu.
+  const renderInto = (elId) => {
+    const el = document.getElementById(elId);
+    if (!el) return false;
+    playerWatchLobby((players) => {
+      const list = Object.entries(players).filter(([_, p]) => !p.isHost);
+      el.innerHTML = list.map(([id, p]) => `
+        <li class="${id === playerState.uid ? 'you' : ''}">${escHtml(p.name || '?')}</li>
+      `).join('');
+    });
+    return true;
+  };
+  renderInto('playerLobbyList') || renderInto('lobbyPlayerList');
 
-  const remainEl = document.getElementById('remainTag');
-  if (remainEl && typeof round.remaining === 'number') {
-    remainEl.innerHTML = `SISA<br>${round.remaining}`;
-  }
-
-  renderField(document.getElementById('field'), round.cards);
-  // Listener klik sudah dipasang via delegation di #field — tidak perlu per-kartu.
+  // VERIFY: sesuaikan ID screen.
+  showFirstExistingScreen('screen-multi-lobby', 'screen-multi-wait', 'screen-lobby');
 }
 
-function onRoundWon(round) {
-  // ✅ FIX D: guard defensive — jangan disable kartu kalau bukan ronde aktif.
-  const cur = playerState.currentRound;
-  if (!cur || cur.number !== round.number) {
-    console.warn('[multi] onRoundWon untuk ronde', round.number, 'diabaikan (current:', cur?.number, ')');
-    return;
+// -------- AUTO-REJOIN --------
+
+async function tryAutoRejoin(prefilledRoom) {
+  const saved = readSession();
+  if (!saved?.code || !saved?.name) return false;
+
+  if (prefilledRoom && prefilledRoom.toUpperCase() !== saved.code) return false;
+
+  if (Date.now() - (saved.savedAt || 0) > SESSION_TTL_MS) {
+    clearSession();
+    return false;
   }
 
-  document.querySelectorAll('#field .card').forEach(el => { el.style.pointerEvents = 'none'; });
-  const winnerUid = round.winner?.uid;
-  if (!winnerUid) return;
-
-  get(ref(db, `rooms/${playerState.code}/players/${winnerUid}`)).then(s => {
-    const name = s.val()?.name || '?';
-    toast(`Ronde dimenangkan ${name}`, winnerUid === myUid ? 'good' : '');
-  });
-
-  const cardId = round.winner?.cardId;
-  if (cardId) {
-    const correct = document.querySelector(`#field .card[data-id="${CSS.escape(cardId)}"]`);
-    if (correct) correct.classList.add('found');
-  }
-}
-
-async function onCardClick(cardId, btnEl) {
-  const round = playerState.currentRound;
-  if (!round || round.pending) return;
-  if (round.winner) return;
-  if (!Array.isArray(round.cards) || !round.cards.includes(cardId)) return;
-  if (round._claiming) return;
-
-  round._claiming = true;
   try {
-    const res = await runTransaction(
-      ref(db, `rooms/${playerState.code}/currentRound/winner`),
-      (cur) => {
-        if (cur != null) return;
-        // Fix 2: sertakan nomor ronde supaya rule bisa memvalidasi
-        // bahwa klik ini memang untuk ronde yang sedang berjalan.
-        return { uid: myUid, cardId, round: round.number };
-      }
+    await signIn();
+    const uid = auth.currentUser.uid;
+
+    const [metaSnap, playerSnap] = await Promise.all([
+      get(ref(db, `rooms/${saved.code}/meta`)),
+      get(ref(db, `rooms/${saved.code}/players/${uid}`)),
+    ]);
+
+    if (!metaSnap.exists() || !playerSnap.exists()) {
+      clearSession();
+      return false;
+    }
+
+    const meta = metaSnap.val();
+    if (meta.hostUid === uid) {
+      // Host punya jalur sendiri (initHost), bukan di sini.
+      clearSession();
+      return false;
+    }
+
+    playerState.code    = saved.code;
+    playerState.uid     = uid;
+    playerState.name    = saved.name;
+    playerState.hostUid = meta.hostUid;
+    playerState.leaving = false;
+
+    // Tandai online kembali
+    await update(ref(db, `rooms/${saved.code}/players/${uid}`), { online: true });
+    await onDisconnect(ref(db, `rooms/${saved.code}/players/${uid}/online`)).set(false);
+
+    // Pasang listener sesuai status
+    playerWatchSelf();
+    playerWatchMeta(
+      () => playerBeginGame(),
+      () => playerShowResult(),
+      () => playerShowLobby(),
+      () => playerExit('disbanded')
     );
 
-    const written = res.snapshot?.val();
-    const weWon =
-      res.committed &&
-      written?.uid === myUid &&
-      written?.cardId === cardId &&
-      written?.round === round.number;
+    if (meta.status === 'playing') {
+      playerBeginGame();
+      toast('Berhasil tersambung kembali', 'good');
+    } else if (meta.status === 'finished') {
+      playerShowResult();
+      toast('Kamu kembali — permainan sudah selesai', '');
+    } else {
+      playerShowLobby();
+      toast('Berhasil kembali ke lobby', 'good');
+    }
+    return true;
+  } catch (err) {
+    console.warn('auto-rejoin gagal:', err);
+    clearSession();
+    return false;
+  }
+}
 
-    if (weWon) {
-      // Fix 1 + Fix C: kunci lokal SEGERA, dan sertakan round di objek lokal.
-      round.winner = { uid: myUid, cardId, round: round.number };
+// =========================================================
+// =========================================================
+// ENTRY POINTS
+// =========================================================
+// =========================================================
 
-      // ✅ FIX C: hanya disable kartu kalau ronde ini MASIH aktif.
-      if (playerState.currentRound?.number === round.number) {
-        document.querySelectorAll('#field .card').forEach(el => {
-          el.style.pointerEvents = 'none';
+// -------- HOST ENTRY --------
+
+function renderHostBookList() {
+  const el = document.getElementById('bookList');
+  if (!el) return;
+
+  el.innerHTML = Object.entries(STRUCTURE).map(([book, chapters]) => `
+    <div class="book-item">
+      <label class="book-label">
+        <input type="checkbox" class="book-check" value="${escHtml(book)}">
+        <strong>${escHtml(book)}</strong>
+      </label>
+      <div class="chapter-list">
+        ${chapters.map(ch => `
+          <label class="chapter-label">
+            <input type="checkbox" class="chapter-check"
+                   data-book="${escHtml(book)}" value="${escHtml(ch)}">
+            ${escHtml(ch)}
+          </label>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+
+  // Interaksi: book checkbox ↔ chapter checkboxes
+  el.querySelectorAll('.book-check').forEach(bookCb => {
+    bookCb.addEventListener('change', () => {
+      const book = bookCb.value;
+      el.querySelectorAll(`.chapter-check[data-book="${CSS.escape(book)}"]`)
+        .forEach(chCb => { chCb.checked = bookCb.checked; });
+      updateHostPoolInfo();
+    });
+  });
+
+  el.querySelectorAll('.chapter-check').forEach(chCb => {
+    chCb.addEventListener('change', () => {
+      const book = chCb.dataset.book;
+      const chapters = el.querySelectorAll(`.chapter-check[data-book="${CSS.escape(book)}"]`);
+      const allChecked = [...chapters].every(c => c.checked);
+      const bookCb = el.querySelector(`.book-check[value="${CSS.escape(book)}"]`);
+      if (bookCb) bookCb.checked = allChecked;
+      updateHostPoolInfo();
+    });
+  });
+}
+
+function getSelectedFilters() {
+  const books = [...document.querySelectorAll('.book-check:checked')].map(cb => cb.value);
+  const chapters = [...document.querySelectorAll('.chapter-check:checked')]
+    .map(cb => `${cb.dataset.book}::${cb.value}`);
+  return { books, chapters };
+}
+
+function getSelectedPool() {
+  const { books, chapters } = getSelectedFilters();
+  if (books.length === 0 && chapters.length === 0) return [];
+  return buildPool(books, chapters);
+}
+
+function updateHostPoolInfo() {
+  const pool = getSelectedPool();
+  const infoEl = document.getElementById('poolInfo');
+  if (infoEl) infoEl.textContent = `${pool.length} kanji`;
+  const btn = document.getElementById('btnCreateRoom');
+  if (btn) btn.disabled = pool.length < MIN_POOL;
+  return pool;
+}
+
+function hostSelectAll(state) {
+  document.querySelectorAll('.book-check, .chapter-check')
+    .forEach(cb => { cb.checked = state; });
+  updateHostPoolInfo();
+}
+
+async function hostCreateRoomFlow() {
+  const pool = getSelectedPool();
+  if (pool.length < MIN_POOL) return;
+
+  const maxPlayersInput = document.getElementById('maxPlayersInput');
+  const maxPlayers = Math.max(2, Math.min(15,
+    Number(maxPlayersInput?.value) || 8));
+
+  const btn = document.getElementById('btnCreateRoom');
+  if (btn) { btn.disabled = true; btn.textContent = 'Membuat…'; }
+
+  try {
+    const code = await hostCreateRoom(pool.map(k => k.id), maxPlayers);
+
+    const roomCodeEl = document.getElementById('roomCode');
+    if (roomCodeEl) roomCodeEl.textContent = code;
+    const roomInfo = document.getElementById('roomInfo');
+    if (roomInfo) roomInfo.hidden = false;
+    const poolSection = document.getElementById('poolSection');
+    if (poolSection) poolSection.hidden = true;
+
+    const hostRoomCode = document.getElementById('hostRoomCode');
+    if (hostRoomCode) hostRoomCode.textContent = code;
+    const hostMaxPlayers = document.getElementById('hostMaxPlayers');
+    if (hostMaxPlayers) hostMaxPlayers.textContent = maxPlayers;
+
+    showScreen('screen-host-lobby');
+
+    hostLobbyRenderFn = (players) => {
+      const list = Object.entries(players).filter(([_, p]) => !p.isHost);
+      const listEl = document.getElementById('hostPlayerList');
+      const countEl = document.getElementById('hostPlayerCount');
+
+      if (countEl) countEl.textContent = list.length;
+      if (listEl) {
+        listEl.innerHTML = list.map(([id, p]) => `
+          <li>
+            <span>${escHtml(p.name || '?')}</span>
+            <button class="btn-kick" data-kick="${escHtml(id)}" type="button">Keluarkan</button>
+          </li>
+        `).join('');
+        listEl.querySelectorAll('[data-kick]').forEach(kb => {
+          kb.addEventListener('click', () => {
+            if (confirm('Keluarkan pemain ini?')) hostKickPlayer(kb.dataset.kick);
+          });
         });
       }
 
-      btnEl.classList.add('found');
-      toast('正解! +1 poin', 'good');
-    } else if (!res.committed) {
-      // Transaksi abort karena winner sudah ada (orang lain lebih cepat).
-      toast('Terlambat!', 'bad');
-    }
+      const startBtn = document.getElementById('btnStartGame');
+      if (startBtn) startBtn.disabled = list.length < 2;
+    };
+    hostWatchLobby(hostLobbyRenderFn);
   } catch (err) {
-    // Fix 5: surface error + pesan yang membedakan kartu salah vs ronde berakhir.
-    btnEl.classList.add('wrong');
-    setTimeout(() => btnEl.classList.remove('wrong'), 500);
-
-    const denied =
-      err?.code === 'PERMISSION_DENIED' ||
-      /permission/i.test(err?.message || '');
-
-    const alreadyWon = !!round.winner;
-
-    toast(
-      denied && !alreadyWon
-        ? 'Bukan kartu itu, coba lagi'
-        : denied
-          ? 'Terlambat!'
-          : 'Gagal mengirim jawaban, coba lagi',
-      'bad'
-    );
-  } finally {
-    round._claiming = false;
+    toast(err.message || 'Gagal membuat room', 'bad');
+    if (btn) { btn.disabled = false; btn.textContent = 'Buat Room ▸'; }
   }
 }
 
-// =========================================================
-// PUBLIC ENTRYPOINTS
-// =========================================================
-export function initPlayer(opts = {}) {
-  const $ = id => document.getElementById(id);
+export async function initHost() {
+  await signIn();
+  myUid = auth.currentUser.uid;
 
-  const codeInput  = $('joinCode');
-  const nameInput  = $('joinName');
-  const errEl      = $('joinError');
-  const btnJoin    = $('btnJoin');
+  renderHostBookList();
+  updateHostPoolInfo();
 
-  if (opts.prefilledRoom) {
-    codeInput.value = opts.prefilledRoom.toUpperCase();
-    nameInput.focus();
-  }
+  document.getElementById('btnAll')?.addEventListener('click', () => hostSelectAll(true));
+  document.getElementById('btnNone')?.addEventListener('click', () => hostSelectAll(false));
+  document.getElementById('btnCreateRoom')?.addEventListener('click', hostCreateRoomFlow);
 
-  document.querySelectorAll('[data-back]').forEach(link => {
-    link.addEventListener('click', (e) => {
-      e.preventDefault();
-      location.href = 'play.html';
+  document.getElementById('btnCopyCode')?.addEventListener('click', () => {
+    const code = hostState.code || document.getElementById('roomCode')?.textContent;
+    if (!code) return;
+    navigator.clipboard?.writeText(code)
+      .then(() => toast('Kode disalin', 'good'))
+      .catch(() => toast('Gagal menyalin', 'bad'));
+  });
+
+  document.getElementById('btnStartGame')?.addEventListener('click', () => {
+    if (confirm('Mulai permainan sekarang?')) hostStartGame();
+  });
+
+  document.getElementById('btnFinishGame')?.addEventListener('click', () => {
+    if (confirm('Akhiri permainan dan tampilkan hasil?')) finishHostGame();
+  });
+
+  document.getElementById('btnPlayAgain')?.addEventListener('click', hostPlayAgain);
+
+  // Disband: semua tombol dengan data-disband
+  document.querySelectorAll('[data-disband]').forEach(el => {
+    el.addEventListener('click', async () => {
+      if (!confirm('Bubarkan room? Semua pemain akan dikeluarkan.')) return;
+      try { await hostDisbandRoom(); toast('Room dibubarkan', ''); }
+      catch (err) { toast(err.message || 'Gagal membubarkan', 'bad'); }
     });
   });
 
-  codeInput?.addEventListener('input', () => {
-    codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+  // Kanji picker (delegation)
+  document.getElementById('kanjiPicker')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-pick]');
+    if (!btn) return;
+    hostPickKanji(btn.dataset.pick);
   });
 
-  const lobbyUpdateCallback = (players) => {
-    const list  = $('lobbyPlayers');
-    const cntEl = $('lobbyCount');
-    const entries = Object.entries(players).filter(([_, p]) => !p.isHost);
-    if (cntEl) cntEl.textContent = entries.length;
-    if (list) {
-      list.innerHTML = entries.map(([id, p]) => `
-        <li class="${p.online === false ? 'offline' : ''}">
-          <span class="dot ${p.online === false ? 'offline' : ''}"></span>
-          ${escHtml(p.name || '?')}
-        </li>
-      `).join('');
+  // Review dialog
+  const reviewBtn = document.getElementById('btnReviewFlags');
+  const reviewDlg = document.getElementById('reviewDialog');
+  const reviewCls = document.getElementById('btnCloseReview');
+  if (reviewBtn && reviewDlg) reviewBtn.addEventListener('click', () => reviewDlg.showModal());
+  if (reviewCls && reviewDlg) reviewCls.addEventListener('click', () => reviewDlg.close());
+}
+
+// -------- PLAYER ENTRY --------
+
+export async function initPlayer(opts = {}) {
+  const prefilled = opts.prefilledRoom?.toUpperCase?.() || null;
+  const codeInput = document.getElementById('joinCode');
+  if (prefilled && codeInput) codeInput.value = prefilled;
+
+  // Coba reconnect dulu sebelum tampilkan form
+  if (await tryAutoRejoin(prefilled)) return;
+
+  // Setup form join
+  const joinBtn   = document.getElementById('btnJoin');
+  const nameInput = document.getElementById('playerName');
+
+  const doJoin = async () => {
+    const code = codeInput?.value;
+    const name = nameInput?.value;
+    if (joinBtn) { joinBtn.disabled = true; joinBtn.textContent = 'Bergabung…'; }
+    try {
+      await playerJoinRoom(code, name);
+
+      // Setelah join sukses: pasang listener dan tampilkan lobby
+      playerWatchSelf();
+      playerWatchMeta(
+        () => playerBeginGame(),
+        () => playerShowResult(),
+        () => playerShowLobby(),
+        () => playerExit('disbanded')
+      );
+      playerShowLobby();
+    } catch (err) {
+      toast(err.message || 'Gagal bergabung', 'bad');
+    } finally {
+      if (joinBtn) { joinBtn.disabled = false; joinBtn.textContent = 'Gabung ▸'; }
     }
   };
 
-  function ensureLeaveButtons() {
-    // Lobby: tombol "Keluar Room" dibuat dinamis karena hanya muncul di
-    // screen-multi-lobby (khusus multiplayer, tidak ada di solo).
-    const lobbyScreen = document.getElementById('screen-multi-lobby');
-    if (lobbyScreen && !document.getElementById('btnLeaveRoom')) {
-      const wrapEl = document.createElement('div');
-      wrapEl.className = 'leave-room-wrap';
-      const btn = document.createElement('button');
-      btn.id = 'btnLeaveRoom';
-      btn.type = 'button';
-      btn.className = 'btn';
-      btn.textContent = 'Keluar Room';
-      btn.addEventListener('click', async () => {
-        if (!playerState.code) return;
-        if (!confirm('Keluar dari room ini?')) return;
-        btn.disabled = true;
-        try { await playerLeaveRoom(); }
-        finally { btn.disabled = false; }
-      });
-      wrapEl.appendChild(btn);
-      (lobbyScreen.querySelector('.wrap') || lobbyScreen).appendChild(wrapEl);
-    }
-
-    // Game: tombol #btnLeaveGame SUDAH ada di play.html.
-    // Tinggal wire handler-nya (sekali saja via dataset flag).
-    const gameBtn = document.getElementById('btnLeaveGame');
-    if (gameBtn && gameBtn.dataset.wired !== '1') {
-      gameBtn.dataset.wired = '1';
-      gameBtn.addEventListener('click', async () => {
-        if (!playerState.code) return;
-        if (!confirm('Keluar dari room ini? Permainan tetap berjalan.')) return;
-        gameBtn.disabled = true;
-        try { await playerLeaveRoom(); }
-        finally { gameBtn.disabled = false; }
-      });
-    }
-  }
-
-  btnJoin?.addEventListener('click', async () => {
-    errEl.textContent = '';
-    btnJoin.disabled = true;
-    btnJoin.textContent = 'Menghubungkan...';
-    try {
-      await playerJoinRoom(codeInput.value, nameInput.value);
-      $('lobbyCode').textContent = playerState.code;
-      showScreen('screen-multi-lobby');
-      playerWatchLobby(lobbyUpdateCallback);
-
-      playerWatchMeta(
-        () => playerBeginGame(),
-        () => showPlayerResult(),
-        () => {
-          showScreen('screen-multi-lobby');
-          playerWatchLobby(lobbyUpdateCallback);
-        },
-        () => playerExit('disbanded')
-      );
-
-      playerWatchSelf();
-      ensureLeaveButtons();
-    } catch (err) {
-      errEl.textContent = err.message || 'Gagal bergabung.';
-    } finally {
-      btnJoin.disabled = false;
-      btnJoin.textContent = 'Gabung ▸';
-    }
+  joinBtn?.addEventListener('click', doJoin);
+  nameInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doJoin();
+  });
+  codeInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') nameInput?.focus();
   });
 
-  $('btnAgain')?.addEventListener('click', () => {
-    if (playerState.code) {
-      showScreen('screen-multi-lobby');
-      playerWatchLobby(lobbyUpdateCallback);
-    } else {
-      location.href = 'play.html';
-    }
-  });
-  $('btnChange')?.addEventListener('click', async () => {
-    if (playerState.code) await playerLeaveRoom({ silent: true });
-    location.href = 'play.html';
-  });
-}
-
-export function initHost() {
-  const $ = id => document.getElementById(id);
-
-  const bookListEl  = $('bookList');
-  const poolInfoEl  = $('poolInfo');
-  const btnCreate   = $('btnCreateRoom');
-  const btnStart    = $('btnStartGame');
-  const btnAgain    = $('btnPlayAgain');
-  const maxPlayersInput  = $('maxPlayersInput');
-  const hostMaxPlayersEl = $('hostMaxPlayers');
-
-  const selectedBooks    = new Set();
-  const selectedChapters = new Set();
-
-  function updatePool() {
-    const pool = buildPool([...selectedBooks], [...selectedChapters]);
-    poolInfoEl.textContent = `${pool.length} kanji`;
-    btnCreate.disabled = pool.length < MIN_POOL;
-    if (pool.length > 0 && pool.length < MIN_POOL) {
-      poolInfoEl.textContent += ` (min ${MIN_POOL})`;
-    }
-    return pool;
-  }
-
-  function renderHostLobbyPlayers(players) {
-    const entries = Object.entries(players).filter(([_, p]) => !p.isHost);
-    const onlineCount = entries.filter(([_, p]) => p.online !== false).length;
-
-    btnStart.disabled = onlineCount < 2;
-    btnStart.textContent = onlineCount < 2
-      ? `Mulai (butuh ≥2, saat ini ${onlineCount}) ▸`
-      : `Mulai (${onlineCount} pemain) ▸`;
-
-    const listEl = $('hostPlayerList');
-    if (listEl) {
-      listEl.innerHTML = entries.map(([id, p]) => `
-        <li class="${p.online === false ? 'offline' : ''}">
-          <span class="dot ${p.online === false ? 'offline' : ''}"></span>
-          <span class="pname">${escHtml(p.name || '?')}</span>
-          <span class="pstate">${p.online === false ? 'offline' : 'online'}</span>
-          <button class="btn kick-btn" type="button" data-kick="${id}">Tendang</button>
-        </li>
-      `).join('');
-    }
-    const cntEl = $('hostPlayerCount');
-    if (cntEl) cntEl.textContent = onlineCount;
-  }
-
-  // Daftarkan callback agar hostPlayAgain bisa re-attach.
-  hostLobbyRenderFn = renderHostLobbyPlayers;
-
-  Object.entries(STRUCTURE).forEach(([book, chapters]) => {
-    const bookDiv = document.createElement('div');
-    bookDiv.className = 'book';
-    bookDiv.innerHTML = `
-      <div class="book-head">
-        <input type="checkbox" data-book="${book}">
-        <span>${book}</span>
-        <span class="cnt">${chapters.length} bab</span>
-      </div>
-      <div class="chapters"></div>
-    `;
-    const chaptersEl = bookDiv.querySelector('.chapters');
-    chapters.forEach(ch => {
-      const lbl = document.createElement('label');
-      lbl.className = 'chk';
-      lbl.innerHTML = `
-        <input type="checkbox" data-chapter="${book}::${ch}">
-        <span>${ch}</span>
-      `;
-      chaptersEl.appendChild(lbl);
-    });
-    bookListEl.appendChild(bookDiv);
-  });
-
-  bookListEl.addEventListener('change', (e) => {
-    const t = e.target;
-    if (t.matches('[data-book]')) {
-      const book = t.dataset.book;
-      const chapters = STRUCTURE[book] || [];
-      chapters.forEach(ch => {
-        const key = `${book}::${ch}`;
-        const cb = bookListEl.querySelector(`[data-chapter="${CSS.escape(key)}"]`);
-        if (cb) cb.checked = t.checked;
-        if (t.checked) selectedChapters.add(key);
-        else selectedChapters.delete(key);
-      });
-      if (t.checked) selectedBooks.add(book);
-      else selectedBooks.delete(book);
-    } else if (t.matches('[data-chapter]')) {
-      const key = t.dataset.chapter;
-      if (t.checked) selectedChapters.add(key);
-      else selectedChapters.delete(key);
-      const [book] = key.split('::');
-      const bookCb = bookListEl.querySelector(`[data-book="${CSS.escape(book)}"]`);
-      const chapters = STRUCTURE[book] || [];
-      const allChecked = chapters.every(ch => selectedChapters.has(`${book}::${ch}`));
-      if (bookCb) bookCb.checked = allChecked;
-      if (allChecked) selectedBooks.add(book);
-      else selectedBooks.delete(book);
-    }
-    updatePool();
-  });
-
-  $('btnAll')?.addEventListener('click', () => {
-    bookListEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-      cb.checked = true;
-      if (cb.dataset.book) selectedBooks.add(cb.dataset.book);
-      if (cb.dataset.chapter) selectedChapters.add(cb.dataset.chapter);
-    });
-    updatePool();
-  });
-  $('btnNone')?.addEventListener('click', () => {
-    bookListEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
-    selectedBooks.clear();
-    selectedChapters.clear();
-    updatePool();
-  });
-
-  updatePool();
-
-  btnCreate?.addEventListener('click', async () => {
-    btnCreate.disabled = true;
-    btnCreate.textContent = 'Membuat room...';
-    try {
-      const pool = buildPool([...selectedBooks], [...selectedChapters]);
-      const ids = pool.map(k => k.id);
-      const rawMax = parseInt(maxPlayersInput?.value, 10);
-      const maxP = Number.isFinite(rawMax) ? Math.max(2, Math.min(15, rawMax)) : 8;
-      const code = await hostCreateRoom(ids, maxP);
-
-      $('roomCode').textContent = code;
-      if (hostMaxPlayersEl) hostMaxPlayersEl.textContent = maxP;
-      $('roomInfo').hidden = false;
-      $('hostRoomCode').textContent = code;
-      $('poolSection').hidden = true;
-
-      showScreen('screen-host-lobby');
-
-      hostWatchLobby(renderHostLobbyPlayers);
-    } catch (err) {
-      toast(err.message || 'Gagal membuat room', 'bad');
-      btnCreate.disabled = false;
-      btnCreate.textContent = 'Buat Room';
-    }
-  });
-
-  $('btnCopyCode')?.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText($('roomCode').textContent);
-      toast('Kode room disalin', 'good');
-    } catch {
-      toast('Gagal menyalin', 'bad');
-    }
-  });
-
-  btnStart?.addEventListener('click', async () => {
-    if (btnStart.disabled) return;
-    btnStart.disabled = true;
-    try {
-      await hostStartGame();
-    } catch (err) {
-      toast(err.message || 'Gagal memulai', 'bad');
-      btnStart.disabled = false;
-    }
-  });
-
-  btnAgain?.addEventListener('click', async () => {
-    try {
-      await hostPlayAgain();
-    } catch (err) {
-      toast(err.message || 'Gagal reset', 'bad');
-    }
-  });
-
-  // ✅ NEW: tombol "Akhiri Permainan" di layar game.
-  // Tombol "Bubar" (btnDisbandGame) otomatis ter-wire oleh handler
-  // [data-disband] yang sudah ada di bawah.
-  $('btnFinishGame')?.addEventListener('click', async () => {
-    if (!hostState.code) return;
-    if (hostState.finished) return;
-    if (!confirm('Akhiri permainan sekarang? Skor saat ini akan menjadi hasil akhir.')) return;
-    const btn = $('btnFinishGame');
-    btn.disabled = true;
-    try {
-      await finishHostGame();
-    } catch (err) {
-      toast(err.message || 'Gagal mengakhiri permainan', 'bad');
-      btn.disabled = false;
-    }
-  });
-
-  document.querySelectorAll('[data-disband]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!hostState.code) return;
-      if (!confirm('Bubarkan room ini? Semua pemain akan dikeluarkan.')) return;
-      btn.disabled = true;
-      try {
-        await hostDisbandRoom();
-        toast('Room dibubarkan', 'good');
-      } catch (err) {
-        toast(err.message || 'Gagal membubarkan', 'bad');
-      } finally {
-        btn.disabled = false;
-      }
+  // Tombol "Keluar" / "Leave" saat di lobby (defensif — ID bisa beda)
+  // VERIFY: sesuaikan dengan tombol leave di play.html-mu.
+  document.querySelectorAll('[data-leave]').forEach(el => {
+    el.addEventListener('click', () => {
+      if (confirm('Keluar dari room?')) playerLeaveRoom();
     });
   });
 
-  document.getElementById('hostPlayerList')?.addEventListener('click', async (e) => {
-    const btn = e.target.closest('[data-kick]');
-    if (!btn) return;
-    const uid   = btn.dataset.kick;
-    const pname = btn.closest('li')?.querySelector('.pname')?.textContent?.trim() || 'pemain';
-    if (!confirm(`Keluarkan ${pname} dari room?`)) return;
-    btn.disabled = true;
-    try {
-      await hostKickPlayer(uid);
-      toast(`${pname} dikeluarkan`, 'good');
-    } catch (err) {
-      toast(err.message || 'Gagal mengeluarkan pemain', 'bad');
-      btn.disabled = false;
-    }
-  });
-
-  // Picker kanji (host memilih soal) — event delegation
-  document.getElementById('kanjiPicker')?.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-pick]');
-    if (!btn || btn.disabled) return;
-    hostPickKanji(btn.dataset.pick);
-  });
+  // Bersihkan session saat user menutup tab secara eksplisit? Tidak — biarkan
+  // session hidup (TTL 6 jam) supaya refresh/crash masih bisa recover.
 }
