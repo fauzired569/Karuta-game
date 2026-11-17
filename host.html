@@ -8,6 +8,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
+<!-- FIX #3: link anti-cheat.css (sebelumnya tidak ada → style warn-badge,
+     chip.suspicious, btn-warn, review-dialog tidak pernah diterapkan) -->
 <link rel="stylesheet" href="css/anti-cheat.css">
 </head>
 <body>
@@ -80,10 +82,12 @@
     <div class="host-status" id="hostStatus">Pilih kanji untuk jadi soal…</div>
     <div class="kanji-picker" id="kanjiPicker"></div>
 
+    <!-- Kontrol host saat game berlangsung (FAB, fixed bottom-right).
+         FIX #4: tombol Review ditambahkan — hidden by default, muncul
+         otomatis saat `renderHostFlags()` mendeteksi ada flag. -->
     <div class="host-game-actions">
-      <!-- NEW: tombol review (hidden kalau belum ada flag) -->
       <button class="btn btn-warn" id="btnReviewFlags" type="button" hidden
-              title="Tinjau laporan aktivitas mencurigakan">
+              title="Tinjau aktivitas mencurigakan">
         ⚠ Review <span id="flagCount">0</span>
       </button>
       <button class="btn" id="btnFinishGame" type="button"
@@ -111,10 +115,17 @@
 
 <div class="toast" id="toast"></div>
 
-<!-- NEW: dialog review flag -->
-<dialog id="reviewDialog" class="review-dialog">
-  <h3>⚠ Laporan Aktivitas Mencurigakan</h3>
-  <div id="reviewContent"><p class="hint">Belum ada data.</p></div>
+<!-- FIX #4: Dialog review anti-cheat.
+     Diletakkan di luar #app / .screen agar `showModal()` selalu berhasil
+     meskipun parent screen dalam keadaan display:none. `<dialog>` modern
+     menggunakan top layer, jadi posisi DOM tidak memengaruhi stacking —
+     tapi isolasi di body-level menghindari edge case browser lama. -->
+<dialog class="review-dialog" id="reviewDialog" aria-labelledby="reviewTitle">
+  <h3 id="reviewTitle">⚠ Aktivitas Mencurigakan</h3>
+  <p class="hint">Data ini hanya untuk tinjauan wasit — tidak ada auto-kick.</p>
+  <div id="reviewContent">
+    <p class="hint">Belum ada aktivitas mencurigakan.</p>
+  </div>
   <div class="review-actions">
     <button class="btn" id="btnCloseReview" type="button">Tutup</button>
   </div>
