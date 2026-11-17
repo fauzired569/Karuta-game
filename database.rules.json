@@ -64,6 +64,19 @@
               ".validate": "newData.isNumber()"
             }
           }
+        },
+
+        "flags": {
+          ".read": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
+
+          "$uid": {
+            ".read": "auth != null && (auth.uid === $uid || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val())",
+
+            "$flagId": {
+              ".write": "auth != null && auth.uid === $uid && !data.exists() && newData.hasChildren(['type','round'])",
+              ".validate": "newData.child('type').isString() && newData.child('type').val().length >= 1 && newData.child('type').val().length <= 64 && newData.child('round').isNumber()"
+            }
+          }
         }
       }
     }
