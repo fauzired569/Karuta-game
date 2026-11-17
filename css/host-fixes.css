@@ -1,0 +1,214 @@
+/* css/host-fixes.css
+   Patch aditif untuk gap di style.css.
+   WAJIB di-load SETELAH css/style.css dan css/anti-cheat.css.
+
+   Isi:
+   - .host-game-actions          FAB kontainer (Review / Akhiri / Bubar)
+   - .btn-danger                 tombol destruktif (Bubar saat game)
+   - .card.correct               alias dari .card.found (kartu pemenang)
+   - .btn-kick                   alias dari .kick-btn (tombol kick di lobby)
+   - .book-item / .book-label / .chapter-list / .chapter-label
+                                 alias dari .book / .book-head / .chapters / .chk
+                                 (dipakai multi.js renderHostBookList)
+   - Adjust padding-bottom .kanji-picker untuk 3 tombol FAB
+   - Pulse animation tombol Review
+   - Mobile + reduced-motion tweaks
+*/
+
+/* =========================================================
+   1. FAB — Host game actions (Review / Akhiri / Bubar)
+   ========================================================= */
+
+.host-game-actions {
+  position: fixed;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  z-index: 50;
+  pointer-events: none;   /* klik di gap menembus ke picker di belakang */
+}
+
+.host-game-actions .btn {
+  pointer-events: auto;
+  box-shadow: 0 4px 14px rgba(0,0,0,.25);
+  padding: 8px 12px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* Beri ruang scroll ekstra agar kartu terakhir picker tidak tertutup FAB.
+   Ukuran FAB 3 tombol ≈ 132px; buffer 180px. */
+#screen-host-game .kanji-picker {
+  padding-bottom: 180px;
+}
+
+/* Pulse lembut pada tombol Review saat ada flag baru */
+.host-game-actions .btn-warn:not([hidden]) {
+  animation: flag-pulse 1.6s ease-in-out infinite;
+}
+@keyframes flag-pulse {
+  0%, 100% { box-shadow: 0 4px 14px rgba(0,0,0,.25), 0 0 0 0 rgba(255,207,51,.6); }
+  50%      { box-shadow: 0 4px 14px rgba(0,0,0,.25), 0 0 0 6px rgba(255,207,51,0); }
+}
+
+/* =========================================================
+   2. .btn-danger — tombol destruktif
+   ========================================================= */
+
+.btn-danger {
+  background: #c62828 !important;
+  color: #fff !important;
+  font-weight: 700;
+}
+.btn-danger:hover,
+.btn-danger:focus-visible { background: #b71c1c !important; }
+.btn-danger:active         { background: #8e0000 !important; }
+
+/* =========================================================
+   3. .card.correct — alias dari .card.found
+   =========================================================
+   multi.js memakai .correct pada kartu yang benar. style.css
+   hanya punya .found (animasi fade-out). Kita pakai highlight
+   hijau statis (bukan fade-out) agar pemenang tetap terlihat.
+*/
+
+.card.correct {
+  border-color: var(--green) !important;
+  background: linear-gradient(180deg, #ddffe9, #b6f0cd) !important;
+  box-shadow: 0 0 0 4px rgba(47, 125, 79, 0.3), 0 4px 0 rgba(90,18,18,.4) !important;
+  pointer-events: none;
+  cursor: default;
+}
+
+/* Disabled card (mis. saat winner diputuskan) sedikit diredupkan
+   supaya jelas tidak bisa diklik lagi. Tidak berlaku untuk .correct. */
+.card:disabled:not(.correct) {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+/* =========================================================
+   4. .btn-kick — alias dari .kick-btn
+   =========================================================
+   multi.js renderHostLobbyFn memakai class .btn-kick.
+   Ratakan ke kanan dengan margin-left:auto.
+*/
+
+.btn-kick {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: .72rem;
+  font-weight: 800;
+  border-radius: 8px;
+  background: #ffe9e9;
+  color: #8c1f1f;
+  border: 2px solid #e0a3a3;
+  box-shadow: 0 2px 0 rgba(0,0,0,.15);
+  margin-left: auto;
+  font-family: inherit;
+  cursor: pointer;
+}
+.btn-kick:active  { transform: translateY(2px); box-shadow: none; }
+.btn-kick:disabled{ opacity: .5; cursor: not-allowed; }
+
+/* =========================================================
+   5. Book list — alias dari .book / .book-head / .chapters / .chk
+   =========================================================
+   multi.js renderHostBookList menghasilkan markup dengan
+   .book-item / .book-label / .chapter-list / .chapter-label.
+   Kita salin style dari style.css agar konsisten.
+*/
+
+.book-item {
+  background: var(--cream);
+  border-radius: 14px;
+  border: 3px solid var(--red-dark);
+  box-shadow: 0 8px 0 rgba(0,0,0,.22), 0 12px 24px rgba(0,0,0,.25);
+  padding: 12px 14px 14px;
+  margin-bottom: 14px;
+}
+
+.book-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-weight: 900;
+  font-size: 1.05rem;
+  color: var(--red-dark);
+  padding-bottom: 8px;
+  border-bottom: 2px dashed #e3d2ac;
+  margin-bottom: 10px;
+  user-select: none;
+}
+.book-label input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--red);
+  cursor: pointer;
+}
+
+.chapter-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chapter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  user-select: none;
+  background: #fffaf0;
+  border: 2px solid #e3d2ac;
+  border-radius: 999px;
+  padding: 6px 12px 6px 9px;
+  font-size: .85rem;
+  font-weight: 700;
+  color: #6b4a2a;
+  transition: .14s;
+}
+.chapter-label:hover { border-color: var(--gold); }
+.chapter-label input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--red);
+  cursor: pointer;
+  margin: 0;
+}
+.chapter-label:has(input:checked) {
+  background: #fff0cf;
+  border-color: var(--gold);
+  color: var(--red-dark);
+}
+
+/* =========================================================
+   6. Mobile — tombol FAB lebih kecil & rapat
+   ========================================================= */
+
+@media (max-width: 480px) {
+  .host-game-actions {
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    gap: 5px;
+  }
+  .host-game-actions .btn {
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+  #screen-host-game .kanji-picker {
+    padding-bottom: 150px;
+  }
+}
+
+/* =========================================================
+   7. Reduced motion
+   ========================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  .host-game-actions .btn-warn:not([hidden]) { animation: none; }
+}
