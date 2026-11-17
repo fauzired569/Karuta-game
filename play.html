@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html lang="id">
 <head>
-  <link rel="stylesheet" href="css/anti-cheat.css">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Kanji Karuta</title>
@@ -11,6 +10,7 @@
 <link rel="stylesheet" href="css/style.css">
 <link rel="stylesheet" href="css/anti-cheat.css">
 <link rel="stylesheet" href="css/host-fixes.css">
+</head>
 <body>
 
 <div id="app">
@@ -40,7 +40,9 @@
   <!-- ============ MULTI JOIN ============ -->
   <section id="screen-multi-join" class="screen">
     <div class="wrap">
-      <a href="#" data-back class="back-link">← Kembali</a>
+      <!-- FIX: href ke index.html (bukan "#") karena tidak ada handler
+           [data-back] di boot.js/multi.js -->
+      <a href="index.html" class="back-link">← Kembali</a>
       <h1 class="title">Gabung Room<small>MULTIPLAYER</small></h1>
       <p class="subtitle">Masukkan kode 4 huruf dari wasit.</p>
 
@@ -52,7 +54,9 @@
         </label>
         <label>
           Nama Kamu
-          <input id="joinName" type="text" maxlength="16"
+          <!-- FIX: rename id joinName → playerName agar cocok dengan
+               multi.js initPlayer: document.getElementById('playerName') -->
+          <input id="playerName" type="text" maxlength="16"
                  placeholder="Nama tampilan" autocomplete="off">
         </label>
         <button class="btn primary" id="btnJoin" type="button">Gabung ▸</button>
@@ -69,7 +73,9 @@
 
       <div class="lobby-info">
         <h3>Pemain (<span id="lobbyCount">0</span>)</h3>
-        <ul class="lobby-list" id="lobbyPlayers"></ul>
+        <!-- FIX: rename lobbyPlayers → playerLobbyList agar cocok dengan
+             multi.js playerShowLobby: renderInto('playerLobbyList') -->
+        <ul class="lobby-list" id="playerLobbyList"></ul>
         <p class="hint">Wasit akan memulai saat semua siap.</p>
       </div>
     </div>
@@ -93,7 +99,7 @@
     </div>
   </section>
 
-    <!-- ============ GAME (shared: solo & multi) ============ -->
+  <!-- ============ GAME (shared: solo & multi) ============ -->
   <section id="screen-game" class="screen">
     <div class="hud">
       <div class="referee">
@@ -108,11 +114,12 @@
     </div>
     <div class="field" id="field"></div>
 
-    <!-- ✅ NEW: tombol keluar untuk solo maupun player multiplayer.
-         solo.js dan multi.js masing-masing memasang handler-nya sendiri
-         (hanya satu modul yang di-load per halaman, jadi tidak konflik).
-         Gaya visual (.btn-leave-fab) sudah ada di style.css. -->
-    <button class="btn btn-leave-fab" id="btnLeaveGame" type="button">Keluar</button>
+    <!-- FIX: tambahkan data-leave agar multi.js playerLeaveRoom handler
+         terpasang. ID btnLeaveGame tetap ada untuk solo.js yang mungkin
+         attach langsung ke elemen ini. Hanya satu modul di-load per page,
+         jadi tidak ada double-binding. -->
+    <button class="btn btn-leave-fab" id="btnLeaveGame" type="button"
+            data-leave>Keluar</button>
   </section>
 
   <!-- ============ RESULT ============ -->
