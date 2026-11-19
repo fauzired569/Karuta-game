@@ -264,4 +264,31 @@
 #kanjiPicker .pick-card.is-used {
   opacity: .35;
   pointer-events: none;
+   /* =========================================================
+   9. FEEDBACK "SUDAH MEMILIH" — kartu salah / terkunci
+   =========================================================
+   Kartu yang dipilih pemain salah ditandai merah.
+   Kartu lain tetap disabled (tidak bisa diklik) hingga ronde
+   berganti, memastikan satu pemilihan per ronde.
+   ========================================================= */
+
+.card.wrong {
+  border-color: #c62828 !important;
+  background: linear-gradient(180deg, #ffe5e5, #f5b6b6) !important;
+  box-shadow: 0 0 0 4px rgba(198, 40, 40, 0.3), 0 4px 0 rgba(90, 18, 18, .4) !important;
+  pointer-events: none;
+  cursor: default;
+  animation: card-shake 0.35s ease-in-out;
+}
+
+@keyframes card-shake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-3px); }
+  75%      { transform: translateX(3px); }
+}
+
+/* Kartu yang sudah dipilih pemain (benar) — hijau, sudah ada di .correct */
+
+@media (prefers-reduced-motion: reduce) {
+  .card.wrong { animation: none; }
 }
