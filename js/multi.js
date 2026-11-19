@@ -1,5 +1,12 @@
 // js/multi.js — Logika multiplayer: host (wasit) + player, Firebase RTDB v9 modular
 // Self-contained — TIDAK mem-import penalty.js (logika penalti inline).
+//
+// Changelog:
+//   [+] Satu pemilihan per ronde: pick ditulis ke Firebase picks/{uid}/{round},
+//       rules !data.exists() menjamin 1 write per pemain per ronde.
+//   [+] Kartu salah ditandai merah (.wrong), field terkunci sampai ronde baru.
+//   [+] Reconnect / refresh: pick dibaca ulang dari Firebase & field tetap terkunci.
+//   [+] Play Again: picks: null di-wipe, cache lokal direset otomatis.
 
 import { firebaseConfig } from './firebase-config.js';
 import { KANJI, STRUCTURE } from './data.js';
@@ -29,20 +36,14 @@ const SESSION_KEY        = 'karuta_session_v1';
 const SESSION_TTL_MS     = 6 * 60 * 60 * 1000;
 
 // =========================================================
-// PENALTY (inline — sebelumnya di penalty.js)
+// PENALTY (inline)
 // =========================================================
 const PENALTY_PER_FLAG = 1;
 const PENALTY_TYPES = new Set([
-  'copy_attempt',
-  'cut_attempt',
-  'context_menu',
-  'devtools_f12',
-  'devtools_shortcut',
-  'shortcut_c_in_prompt',
-  'shortcut_x_in_prompt',
-  'shortcut_u',
-  'shortcut_s',
-  'shortcut_p',
+  'copy_attempt', 'cut_attempt', 'context_menu',
+  'devtools_f12', 'devtools_shortcut',
+  'shortcut_c_in_prompt', 'shortcut_x_in_prompt',
+  'shortcut_u', 'shortcut_s', 'shortcut_p',
 ]);
 
 function isPenaltyType(type) {
@@ -200,13 +201,15 @@ function renderField(fieldEl, cardIds) {
 }
 
 // =========================================================
-// PLAYER STATE
+// PLAYER STATE (PATCH A — picks & picksFetching)
 // =========================================================
 let playerState = {
   code: null, uid: null, name: '', isHost: false,
   currentRound: null, players: {}, settings: null,
   lastCardsKey: null, lastRoundNumber: 0, clickedThisRound: false,
   currentScreen: null, metaStatus: 'lobby',
+  picks: {},            // { [roundNumber]: { cardId, correct, at } }
+  picksFetching: {},    // { [roundNumber]: true } — guard fetch ganda
   unsub: [], antiCheat: null,
 };
 
@@ -293,7 +296,7 @@ function poolIdsFromSettings(settings) {
   if (!raw) return [];
   let ids;
   if (Array.isArray(raw))              ids = raw;
-  else if (typeof raw === 'object')    ids = Object.values(raw);   // Firebase object → array
+  else if (typeof raw === 'object')    ids = Object.values(raw);
   else                                 return [];
   const seen = new Set();
   return ids.filter(id => {
@@ -327,7 +330,7 @@ async function loadPoolFromSettings(code) {
 }
 
 // =========================================================
-// HOST — Setup: render book list (SYNC, dipanggil sebelum auth)
+// HOST — Setup: render book list
 // =========================================================
 function hostRenderBookList() {
   const el = document.getElementById('bookList');
@@ -807,6 +810,7 @@ async function hostFinishGame() {
   hostShowResult();
 }
 
+// PATCH F — hostPlayAgain menambahkan 'picks': null
 async function hostPlayAgain() {
   if (!hostState.code) return;
   hostState.used = new Set();
@@ -821,6 +825,7 @@ async function hostPlayAgain() {
     'meta/startedAt': null,
     'currentRound': null,
     'targetId': null,
+    'picks': null,        // ← WAJIB: wipe semua pick agar game baru bisa dimainkan
   };
   Object.entries(hostState.playersCache || {}).forEach(([uid, p]) => {
     if (!p.isHost) updates[`players/${uid}/score`] = 0;
@@ -883,7 +888,7 @@ function hostShowReview() {
 }
 
 // =========================================================
-// PLAYER — Join / watchers / screens
+// PLAYER — Join
 // =========================================================
 async function playerJoinRoom(rawCode, rawName) {
   const code = String(rawCode || '').trim().toUpperCase();
@@ -919,6 +924,8 @@ async function playerJoinRoom(rawCode, rawName) {
   playerState.lastRoundNumber = 0;
   playerState.lastCardsKey = null;
   playerState.clickedThisRound = false;
+  playerState.picks = {};
+  playerState.picksFetching = {};
 
   saveSession();
 
@@ -945,6 +952,9 @@ async function playerJoinRoom(rawCode, rawName) {
   playerWatchRoom();
 }
 
+// =========================================================
+// PLAYER — Watchers
+// =========================================================
 function playerWatchRoom() {
   playerState.unsub.forEach(fn => { try { fn(); } catch {} });
   playerState.unsub = [];
@@ -953,7 +963,19 @@ function playerWatchRoom() {
   playerState.unsub.push(onValue(ref(db, `rooms/${code}/meta`), (snap) => {
     const meta = snap.val();
     if (!meta) { toast('Room dibubarkan.'); playerLeave(); return; }
+    const prev = playerState.metaStatus;
     playerState.metaStatus = meta.status;
+
+    // Transisi finished → lobby = host reset permainan (Play Again).
+    // Wipe cache pick lokal agar ronde baru bisa dipilih kembali.
+    if (meta.status === 'lobby' && prev === 'finished') {
+      playerState.picks = {};
+      playerState.picksFetching = {};
+      playerState.lastRoundNumber = 0;
+      playerState.lastCardsKey = null;
+      playerState.clickedThisRound = false;
+    }
+
     if (meta.status === 'finished') playerShowResult();
     else if (meta.status === 'lobby') {
       if (playerState.currentScreen !== 'screen-multi-join') playerShowLobby();
@@ -983,6 +1005,9 @@ function playerWatchRoom() {
   playerShowLobby();
 }
 
+// =========================================================
+// PLAYER — Screens
+// =========================================================
 function playerShowScreen(id) { showScreen(id); playerState.currentScreen = id; }
 
 function playerShowJoinForm({ prefilledRoom = null } = {}) {
@@ -1034,6 +1059,23 @@ function playerRenderLobby() {
   }
 }
 
+// =========================================================
+// PATCH B — Helper lock field setelah pick
+// =========================================================
+function lockFieldAfterPick(fieldEl, pick) {
+  if (!fieldEl || !pick) return;
+  fieldEl.querySelectorAll('.card').forEach(card => {
+    card.disabled = true;
+    if (card.dataset.id === pick.cardId) {
+      if (pick.correct) card.classList.add('correct');
+      else              card.classList.add('wrong');
+    }
+  });
+}
+
+// =========================================================
+// PATCH D — playerRenderGame dengan fetch pick & lock
+// =========================================================
 function playerRenderGame() {
   const round = playerState.currentRound;
   const meaningEl = document.getElementById('meaning');
@@ -1050,6 +1092,8 @@ function playerRenderGame() {
     playerState.lastRoundNumber = round.number;
     playerState.clickedThisRound = false;
     playerState.lastCardsKey = null;
+    playerState.picksFetching = {};   // reset guard fetch untuk ronde baru
+    // playerState.picks TIDAK direset — biar pick ronde lama tetap konsisten
   }
 
   renderPrompt(meaningEl, round.targetReading, round.targetMeaning);
@@ -1062,7 +1106,38 @@ function playerRenderGame() {
   }
 
   playerRenderScores();
-  if (round.winner) highlightWinnerCard(round.winner.cardId);
+
+  const rn = round.number;
+  const cached = playerState.picks[rn];
+
+  if (cached) {
+    // Sudah pernah memilih → lock & highlight
+    playerState.clickedThisRound = true;
+    lockFieldAfterPick(fieldEl, cached);
+  } else if (!playerState.picksFetching[rn] && !round.winner && !round.processed && !round.expired) {
+    // Fetch pick dari Firebase SEKALI per ronde (untuk survive refresh / multi-tab)
+    playerState.picksFetching[rn] = true;
+    get(ref(db, `rooms/${playerState.code}/picks/${myUid}/${rn}`))
+      .then(snap => {
+        const val = snap.val();
+        if (val) {
+          playerState.picks[rn] = val;
+          if (playerState.currentRound?.number === rn) {
+            playerRenderGame();   // re-render dengan pick terkunci
+          }
+        }
+      })
+      .catch(e => console.warn('[pick] fetch failed:', e));
+  }
+
+  if (round.winner) {
+    highlightWinnerCard(round.winner.cardId);
+  } else if (round.processed || round.expired) {
+    // Ronde selesai tanpa winner (timeout) — lock semua kartu
+    if (fieldEl) {
+      fieldEl.querySelectorAll('.card').forEach(c => { c.disabled = true; });
+    }
+  }
 }
 
 function playerRenderScores() {
@@ -1099,31 +1174,63 @@ function wireFieldClicks() {
   });
 }
 
+// =========================================================
+// PATCH C — handleCardClick: satu pemilihan per ronde
+// =========================================================
 async function handleCardClick(btn) {
   const cardId = btn.dataset.id;
   const round = playerState.currentRound;
   if (!cardId || !round) return;
-  if (btn.disabled || btn.classList.contains('correct')) return;
+  if (btn.disabled || btn.classList.contains('correct') || btn.classList.contains('wrong')) return;
   if (round.winner || round.processed || round.expired) return;
   if (playerState.clickedThisRound) return;
+  if (playerState.picks[round.number]) return;
 
+  const fieldEl = document.getElementById('field') || document.getElementById('cardField');
   const target = KANJI.find(k =>
     k.meaning === round.targetMeaning && k.reading === round.targetReading
   );
-  if (!target || cardId !== target.id) {
-    btn.classList.add('wrong');
-    setTimeout(() => btn.classList.remove('wrong'), 400);
+  const correct = !!(target && cardId === target.id);
+
+  // Lock LOKAL sebelum await — cegah double-click cepat.
+  playerState.clickedThisRound = true;
+  const pick = { cardId, correct, at: Date.now() };
+  playerState.picks[round.number] = pick;
+  lockFieldAfterPick(fieldEl, pick);
+
+  // Tulis pick ke Firebase — rules `!data.exists()` menjamin 1x per ronde.
+  const pickRef = ref(db, `rooms/${playerState.code}/picks/${myUid}/${round.number}`);
+  try {
+    await set(pickRef, pick);
+  } catch (e) {
+    console.warn('[pick] write failed:', e.message);
+    // Tarik pick existing agar UI konsisten (sudah dipilih di tab lain / device lain)
+    try {
+      const snap = await get(pickRef);
+      const existing = snap.val();
+      if (existing) {
+        playerState.picks[round.number] = existing;
+        lockFieldAfterPick(fieldEl, existing);
+      }
+    } catch {}
+    toast('⚠ Ronde ini sudah Anda pilih sebelumnya.', 'warn');
     return;
   }
 
-  playerState.clickedThisRound = true;
+  if (!correct) {
+    toast('❌ Salah — tidak bisa memilih lagi di ronde ini.', 'warn');
+    return;
+  }
+
+  // Benar → ikut race winner (hanya satu pemenang per ronde)
   try {
-    const result = await runTransaction(
+    await runTransaction(
       ref(db, `rooms/${playerState.code}/currentRound/winner`),
       (cur) => (cur && cur.uid) ? cur : { uid: myUid, cardId, round: round.number }
     );
-    if (result.committed) btn.classList.add('correct');
-  } catch (e) { console.warn('winner write failed:', e); }
+  } catch (e) {
+    console.warn('winner write failed:', e);
+  }
 }
 
 function highlightWinnerCard(cardId) {
@@ -1135,6 +1242,9 @@ function highlightWinnerCard(cardId) {
   });
 }
 
+// =========================================================
+// PATCH E — playerLeave: reset picks
+// =========================================================
 async function playerLeave() {
   if (playerState.antiCheat) { playerState.antiCheat.stop(); playerState.antiCheat = null; }
   playerState.unsub.forEach(fn => { try { fn(); } catch {} });
@@ -1145,6 +1255,8 @@ async function playerLeave() {
   playerState.currentRound = null; playerState.players = {};
   playerState.lastCardsKey = null; playerState.lastRoundNumber = 0;
   playerState.clickedThisRound = false; playerState.currentScreen = null;
+  playerState.picks = {};
+  playerState.picksFetching = {};
   clearSession();
   if (code && uid) { try { await remove(ref(db, `rooms/${code}/players/${uid}`)); } catch {} }
   location.href = 'play.html?mode=multi';
@@ -1154,11 +1266,9 @@ async function playerLeave() {
 // INIT — Host (render DULU, baru auth)
 // =========================================================
 export async function initHost() {
-  // 1. Render setup UI SEGERA — sebelum auth, agar selalu tampil
   hostRenderBookList();
   hostWireSetupControls();
 
-  // 2. Auth Firebase (tidak memblokir UI)
   try {
     await signIn();
     myUid = auth.currentUser.uid;
