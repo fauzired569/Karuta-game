@@ -81,9 +81,6 @@
     <div class="host-status" id="hostStatus">Pilih kanji untuk jadi soal…</div>
     <div class="kanji-picker" id="kanjiPicker"></div>
 
-    <!-- Kontrol host saat game berlangsung (FAB, fixed bottom-right).
-         FIX #4: tombol Review ditambahkan — hidden by default, muncul
-         otomatis saat `renderHostFlags()` mendeteksi ada flag. -->
     <div class="host-game-actions">
       <button class="btn btn-warn" id="btnReviewFlags" type="button" hidden
               title="Tinjau aktivitas mencurigakan">
@@ -114,14 +111,10 @@
 
 <div class="toast" id="toast"></div>
 
-<!-- FIX #4: Dialog review anti-cheat.
-     Diletakkan di luar #app / .screen agar `showModal()` selalu berhasil
-     meskipun parent screen dalam keadaan display:none. `<dialog>` modern
-     menggunakan top layer, jadi posisi DOM tidak memengaruhi stacking —
-     tapi isolasi di body-level menghindari edge case browser lama. -->
+<!-- Dialog review anti-cheat. Pelanggaran kategori curang otomatis memicu -1 poin. -->
 <dialog class="review-dialog" id="reviewDialog" aria-labelledby="reviewTitle">
   <h3 id="reviewTitle">⚠ Aktivitas Mencurigakan</h3>
-  <p class="hint">Data ini hanya untuk tinjauan wasit — tidak ada auto-kick.</p>
+  <p class="hint">Tinjauan wasit — tidak ada auto-kick. Pelanggaran kategori curang (copy, context-menu, shortcut DevTools) <strong>otomatis dikenai −1 poin</strong>.</p>
   <div id="reviewContent">
     <p class="hint">Belum ada aktivitas mencurigakan.</p>
   </div>
