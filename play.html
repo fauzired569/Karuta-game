@@ -40,9 +40,7 @@
   <!-- ============ MULTI JOIN ============ -->
   <section id="screen-multi-join" class="screen">
     <div class="wrap">
-      <!-- FIX: href ke index.html (bukan "#") karena tidak ada handler
-           [data-back] di boot.js/multi.js -->
-      <a href="index.html" class="back-link">← Kembali</a>
+      <a href="#" data-back class="back-link">← Kembali</a>
       <h1 class="title">Gabung Room<small>MULTIPLAYER</small></h1>
       <p class="subtitle">Masukkan kode 4 huruf dari wasit.</p>
 
@@ -54,9 +52,7 @@
         </label>
         <label>
           Nama Kamu
-          <!-- FIX: rename id joinName → playerName agar cocok dengan
-               multi.js initPlayer: document.getElementById('playerName') -->
-          <input id="playerName" type="text" maxlength="16"
+          <input id="joinName" type="text" maxlength="16"
                  placeholder="Nama tampilan" autocomplete="off">
         </label>
         <button class="btn primary" id="btnJoin" type="button">Gabung ▸</button>
@@ -65,7 +61,7 @@
     </div>
   </section>
 
-  <!-- ============ MULTI LOBBY ============ -->
+  <!-- ============ MULTI LOBBY (player) ============ -->
   <section id="screen-multi-lobby" class="screen">
     <div class="wrap">
       <h1 class="title">Lobby<small>MENUNGGU WASIT</small></h1>
@@ -73,9 +69,7 @@
 
       <div class="lobby-info">
         <h3>Pemain (<span id="lobbyCount">0</span>)</h3>
-        <!-- FIX: rename lobbyPlayers → playerLobbyList agar cocok dengan
-             multi.js playerShowLobby: renderInto('playerLobbyList') -->
-        <ul class="lobby-list" id="playerLobbyList"></ul>
+        <ul class="lobby-list" id="lobbyPlayers"></ul>
         <p class="hint">Wasit akan memulai saat semua siap.</p>
       </div>
     </div>
@@ -114,15 +108,10 @@
     </div>
     <div class="field" id="field"></div>
 
-    <!-- FIX: tambahkan data-leave agar multi.js playerLeaveRoom handler
-         terpasang. ID btnLeaveGame tetap ada untuk solo.js yang mungkin
-         attach langsung ke elemen ini. Hanya satu modul di-load per page,
-         jadi tidak ada double-binding. -->
-    <button class="btn btn-leave-fab" id="btnLeaveGame" type="button"
-            data-leave>Keluar</button>
+    <button class="btn btn-leave-fab" id="btnLeaveGame" type="button">Keluar</button>
   </section>
 
-  <!-- ============ RESULT ============ -->
+  <!-- ============ RESULT (shared: solo & multi) ============ -->
   <section id="screen-result" class="screen">
     <div class="result-card">
       <h2 class="result-title">結果発表</h2>
