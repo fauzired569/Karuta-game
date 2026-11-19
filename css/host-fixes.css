@@ -9,7 +9,7 @@
    - .btn-kick                   alias dari .kick-btn (tombol kick di lobby)
    - .book-item / .book-label / .chapter-list / .chapter-label
                                  alias dari .book / .book-head / .chapters / .chk
-                                 (dipakai multi.js renderHostBookList)
+   - #kanjiPicker .pick-card     kartu pilihan soal di layar host
    - Adjust padding-bottom .kanji-picker untuk 3 tombol FAB
    - Pulse animation tombol Review
    - Mobile + reduced-motion tweaks
@@ -28,7 +28,7 @@
   align-items: flex-end;
   gap: 6px;
   z-index: 50;
-  pointer-events: none;   /* klik di gap menembus ke picker di belakang */
+  pointer-events: none;
 }
 
 .host-game-actions .btn {
@@ -39,13 +39,10 @@
   white-space: nowrap;
 }
 
-/* Beri ruang scroll ekstra agar kartu terakhir picker tidak tertutup FAB.
-   Ukuran FAB 3 tombol ≈ 132px; buffer 180px. */
 #screen-host-game .kanji-picker {
   padding-bottom: 180px;
 }
 
-/* Pulse lembut pada tombol Review saat ada flag baru */
 .host-game-actions .btn-warn:not([hidden]) {
   animation: flag-pulse 1.6s ease-in-out infinite;
 }
@@ -69,11 +66,7 @@
 
 /* =========================================================
    3. .card.correct — alias dari .card.found
-   =========================================================
-   multi.js memakai .correct pada kartu yang benar. style.css
-   hanya punya .found (animasi fade-out). Kita pakai highlight
-   hijau statis (bukan fade-out) agar pemenang tetap terlihat.
-*/
+   ========================================================= */
 
 .card.correct {
   border-color: var(--green) !important;
@@ -83,8 +76,6 @@
   cursor: default;
 }
 
-/* Disabled card (mis. saat winner diputuskan) sedikit diredupkan
-   supaya jelas tidak bisa diklik lagi. Tidak berlaku untuk .correct. */
 .card:disabled:not(.correct) {
   opacity: .55;
   cursor: not-allowed;
@@ -92,10 +83,7 @@
 
 /* =========================================================
    4. .btn-kick — alias dari .kick-btn
-   =========================================================
-   multi.js renderHostLobbyFn memakai class .btn-kick.
-   Ratakan ke kanan dengan margin-left:auto.
-*/
+   ========================================================= */
 
 .btn-kick {
   flex: 0 0 auto;
@@ -116,11 +104,7 @@
 
 /* =========================================================
    5. Book list — alias dari .book / .book-head / .chapters / .chk
-   =========================================================
-   multi.js renderHostBookList menghasilkan markup dengan
-   .book-item / .book-label / .chapter-list / .chapter-label.
-   Kita salin style dari style.css agar konsisten.
-*/
+   ========================================================= */
 
 .book-item {
   background: var(--cream);
@@ -211,4 +195,73 @@
 
 @media (prefers-reduced-motion: reduce) {
   .host-game-actions .btn-warn:not([hidden]) { animation: none; }
+}
+
+/* =========================================================
+   8. KANJI PICKER — kartu pilihan soal di layar host
+   =========================================================
+   multi.js merender tombol .pick-card ke dalam #kanjiPicker.
+   style.css tidak punya aturan untuk class ini, jadi tanpa blok
+   di bawah kartu bisa invisible / 0-ukuran.
+   ========================================================= */
+
+#kanjiPicker {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+  padding: 12px;
+  min-height: 80px;
+}
+
+#kanjiPicker .pick-card {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  min-height: 76px;
+  padding: 8px 10px;
+  border: 2px solid #e3d2ac;
+  border-radius: 12px;
+  background: #fffaf0;
+  color: #3a2a00;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color .14s, transform .14s, box-shadow .14s;
+  box-shadow: 0 2px 0 rgba(0,0,0,.12);
+}
+#kanjiPicker .pick-card:hover,
+#kanjiPicker .pick-card:focus-visible {
+  border-color: var(--gold, #d4a017);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0,0,0,.18);
+  outline: none;
+}
+#kanjiPicker .pick-card:active {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+
+#kanjiPicker .pick-card .kanji {
+  font-size: 1.5rem;
+  font-weight: 900;
+  line-height: 1.1;
+  letter-spacing: .01em;
+}
+
+#kanjiPicker .pick-card .pick-meaning {
+  font-size: .68rem;
+  color: #6b4a2a;
+  margin-top: 4px;
+  max-width: 90px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#kanjiPicker .pick-card.is-used {
+  opacity: .35;
+  pointer-events: none;
 }
