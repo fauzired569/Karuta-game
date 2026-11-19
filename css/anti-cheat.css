@@ -1,6 +1,7 @@
 /* css/anti-cheat.css
    Style untuk anti-cheat: prompt tidak bisa diseleksi, badge warning di HUD host,
-   dan dialog review. Tambahkan <link> di play.html & host.html. */
+   dialog review, indikator skor negatif, dan toast peringatan penalti.
+   Tambahkan <link> di play.html & host.html. */
 
 /* Cegah seleksi teks prompt (deterrent — bukan security). */
 #meaning, #hostMeaning,
@@ -29,6 +30,35 @@
 .chip.suspicious {
   outline: 2px solid #ffcf33;
   outline-offset: 2px;
+}
+
+/* =========================================================
+   PENALTI: skor negatif (pemain yang kena hukuman)
+   ========================================================= */
+.chip.negative {
+  outline: 2px solid #e53935;
+  outline-offset: 2px;
+}
+.chip.negative .cpts {
+  color: #b71c1c;
+  font-weight: 900;
+}
+.chip.negative .cname {
+  color: #7f1d1d;
+}
+.chip.negative.suspicious {
+  /* Kalau kena keduanya, merah menang */
+  outline-color: #e53935;
+}
+
+/* =========================================================
+   Toast peringatan kecurangan
+   ========================================================= */
+.toast.warn {
+  background: #ffcf33;
+  color: #3a2a00;
+  border-color: #d4a017;
+  font-weight: 700;
 }
 
 /* Tombol Review — FAB kuning */
