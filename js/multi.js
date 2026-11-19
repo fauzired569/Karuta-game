@@ -1,27 +1,10 @@
 // js/multi.js — Logika multiplayer: host (wasit) + player, Firebase RTDB v9 modular
-//
-// Changelog:
-//   [+] Anti-cheat integration via './anti-cheat.js'
-//   [+] Session reconnect via sessionStorage
-//   [+] Flag reporting per-round (ditinjau HOST, bukan auto-kick)
-//   [+] Winner race via runTransaction + rule !data.exists()
-//   [+] Per-player field shuffle (anti-collusion posisi)
-//   [+] PENALTI OTOMATIS: flag kategori curang → −1 poin (skor boleh negatif)
-//   [+] Toast peringatan di sisi pemain yang dihukum
-//   [FIX] poolIdsFromSettings(): Object.values untuk array Firebase
-//   [FIX] loadPoolFromSettings(): fallback ke seluruh KANJI bila kosong
-//   [FIX] hostRenderPicker(): render .pick-card + event delegation
-//   [FIX] hostStartGame(): await loadPoolFromSettings SEBELUM render picker
-//   [FIX] hostPickTarget(): tambah ke hostState.used & re-render picker
-//   [FIX] MAX_PLAYERS = 15 (selaras dengan rules & input host.html)
-//   [FIX] playerWatchRoom(): transisi lobby↔game↔result yang benar
-//   [FIX] joinedAt: Date.now() (bukan serverTimestamp) agar lolos validate isNumber
+// Self-contained — TIDAK mem-import penalty.js (logika penalti inline).
 
 import { firebaseConfig } from './firebase-config.js';
 import { KANJI, STRUCTURE } from './data.js';
 import { buildPool } from './core.js';
 import { createAntiCheat } from './anti-cheat.js';
-import { applyPenalty, isPenaltyType, PENALTY_PER_FLAG } from './penalty.js';
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import {
@@ -35,16 +18,58 @@ import {
 // =========================================================
 // Konstanta
 // =========================================================
-const MAX_PLAYERS        = 15;   // selaras dengan input host.html & rules
+const MAX_PLAYERS        = 15;
 const FIELD_SIZE         = 20;
 const MIN_POOL           = 8;
 const ROUND_TIMEOUT_MS   = 15000;
 const NEXT_ROUND_DELAY   = 2500;
 const ROOM_CODE_LEN      = 4;
 const ROOM_CODE_CHARS    = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-
 const SESSION_KEY        = 'karuta_session_v1';
-const SESSION_TTL_MS     = 6 * 60 * 60 * 1000; // 6 jam
+const SESSION_TTL_MS     = 6 * 60 * 60 * 1000;
+
+// =========================================================
+// PENALTY (inline — sebelumnya di penalty.js)
+// =========================================================
+const PENALTY_PER_FLAG = 1;
+const PENALTY_TYPES = new Set([
+  'copy_attempt',
+  'cut_attempt',
+  'context_menu',
+  'devtools_f12',
+  'devtools_shortcut',
+  'shortcut_c_in_prompt',
+  'shortcut_x_in_prompt',
+  'shortcut_u',
+  'shortcut_s',
+  'shortcut_p',
+]);
+
+function isPenaltyType(type) {
+  return PENALTY_TYPES.has(String(type || ''));
+}
+
+async function applyPenalty(dbArg, code, uid, amount = PENALTY_PER_FLAG) {
+  if (!dbArg || !code || !uid) return { committed: false, newScore: null };
+  const delta = Math.abs(Number(amount) || 0);
+  if (delta <= 0) return { committed: false, newScore: null };
+
+  const scoreRef = ref(dbArg, `rooms/${code}/players/${uid}/score`);
+  try {
+    const result = await runTransaction(scoreRef, (current) => {
+      const base = (typeof current === 'number') ? current : 0;
+      return base - delta;
+    });
+    const raw = result.snapshot.val();
+    return {
+      committed: !!result.committed,
+      newScore: typeof raw === 'number' ? raw : null,
+    };
+  } catch (err) {
+    console.warn('[penalty] transaction gagal:', err);
+    return { committed: false, newScore: null };
+  }
+}
 
 // =========================================================
 // Firebase singleton
@@ -111,22 +136,11 @@ function showScreen(id) {
   });
 }
 
-// =========================================================
-// Reading lookup
-// =========================================================
 function getReading(card) {
   if (!card) return '';
-  if (typeof card.reading    === 'string' && card.reading)    return card.reading;
-  if (typeof card.yomi       === 'string' && card.yomi)       return card.yomi;
-  if (typeof card.hiragana   === 'string' && card.hiragana)   return card.hiragana;
-  if (typeof card.kana       === 'string' && card.kana)       return card.kana;
-  if (typeof card.furigana   === 'string' && card.furigana)   return card.furigana;
-  if (Array.isArray(card.reading)  && card.reading.length)  return card.reading.join('、');
-  if (Array.isArray(card.readings) && card.readings.length) return card.readings.join('、');
-  if (Array.isArray(card.yomi)     && card.yomi.length)     return card.yomi.join('、');
-  const on  = card.readings?.on  || card.reading?.on;
-  const kun = card.readings?.kun || card.reading?.kun;
-  if (on || kun) return [on, kun].filter(Boolean).join('、');
+  if (typeof card.reading === 'string' && card.reading) return card.reading;
+  if (typeof card.yomi    === 'string' && card.yomi)    return card.yomi;
+  if (Array.isArray(card.reading) && card.reading.length) return card.reading.join('、');
   return '';
 }
 
@@ -189,32 +203,18 @@ function renderField(fieldEl, cardIds) {
 // PLAYER STATE
 // =========================================================
 let playerState = {
-  code: null,
-  uid: null,
-  name: '',
-  isHost: false,
-  currentRound: null,
-  players: {},
-  settings: null,
-  lastCardsKey: null,
-  lastRoundNumber: 0,
-  clickedThisRound: false,
-  currentScreen: null,
-  metaStatus: 'lobby',
-  unsub: [],
-  antiCheat: null,
+  code: null, uid: null, name: '', isHost: false,
+  currentRound: null, players: {}, settings: null,
+  lastCardsKey: null, lastRoundNumber: 0, clickedThisRound: false,
+  currentScreen: null, metaStatus: 'lobby',
+  unsub: [], antiCheat: null,
 };
 
-// =========================================================
-// Session (auto-reconnect)
-// =========================================================
 function saveSession() {
   if (!playerState.code || !playerState.name) return;
   try {
     sessionStorage.setItem(SESSION_KEY, JSON.stringify({
-      code: playerState.code,
-      name: playerState.name,
-      savedAt: Date.now(),
+      code: playerState.code, name: playerState.name, savedAt: Date.now(),
     }));
   } catch {}
 }
@@ -229,7 +229,7 @@ function readSession() {
 }
 
 // =========================================================
-// Flag reporting + PENALTI OTOMATIS
+// Flag reporting + penalti otomatis
 // =========================================================
 async function reportPlayerFlag(type, extra = {}) {
   const code = playerState.code;
@@ -239,9 +239,7 @@ async function reportPlayerFlag(type, extra = {}) {
   const key = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   set(ref(db, `rooms/${code}/flags/${uid}/${key}`), {
-    type: String(type).slice(0, 64),
-    round,
-    at: Date.now(),
+    type: String(type).slice(0, 64), round, at: Date.now(),
   }).catch(err => console.warn('flag write failed:', err));
 
   if (!isPenaltyType(type)) return;
@@ -252,7 +250,7 @@ async function reportPlayerFlag(type, extra = {}) {
       toast(`⚠ Kecurangan terdeteksi! −${PENALTY_PER_FLAG} poin (skor: ${newScore})`, 'warn');
     }
   } catch (err) {
-    console.warn('penalty transaction failed:', err);
+    console.warn('penalty failed:', err);
   }
 }
 
@@ -260,25 +258,12 @@ async function reportPlayerFlag(type, extra = {}) {
 // HOST STATE
 // =========================================================
 let hostState = {
-  code: null,
-  uid: null,
-  pool: [],
-  used: new Set(),
-  roundNumber: 0,
-  roundTimer: null,
-  unsubPlayers: null,
-  unsubRound: null,
-  unsubMeta: null,
-  unsubFlags: null,
-  flags: {},
-  playersCache: {},
-  processedRounds: new Set(),
-  currentRound: null,
-  metaStatus: 'lobby',
-  maxPlayers: 8,
-  finished: false,
-  settings: null,
-  _pendingPool: [],
+  code: null, uid: null, pool: [], used: new Set(),
+  roundNumber: 0, roundTimer: null,
+  unsubPlayers: null, unsubRound: null, unsubMeta: null, unsubFlags: null,
+  flags: {}, playersCache: {}, processedRounds: new Set(),
+  currentRound: null, metaStatus: 'lobby', maxPlayers: 8,
+  finished: false, settings: null, _pendingPool: [],
 };
 
 function hostCleanup() {
@@ -288,39 +273,28 @@ function hostCleanup() {
   if (hostState.unsubFlags)   try { hostState.unsubFlags();   } catch {}
   if (hostState.roundTimer) clearTimeout(hostState.roundTimer);
 
-  hostState.code = null;
-  hostState.uid = null;
-  hostState.pool = [];
-  hostState.used = new Set();
-  hostState.roundNumber = 0;
-  hostState.roundTimer = null;
-  hostState.unsubPlayers = null;
-  hostState.unsubRound = null;
-  hostState.unsubMeta = null;
-  hostState.unsubFlags = null;
-  hostState.flags = {};
-  hostState.playersCache = {};
+  hostState.code = null; hostState.uid = null;
+  hostState.pool = []; hostState.used = new Set();
+  hostState.roundNumber = 0; hostState.roundTimer = null;
+  hostState.unsubPlayers = null; hostState.unsubRound = null;
+  hostState.unsubMeta = null; hostState.unsubFlags = null;
+  hostState.flags = {}; hostState.playersCache = {};
   hostState.processedRounds = new Set();
-  hostState.currentRound = null;
-  hostState.metaStatus = 'lobby';
-  hostState.finished = false;
-  hostState.settings = null;
+  hostState.currentRound = null; hostState.metaStatus = 'lobby';
+  hostState.finished = false; hostState.settings = null;
   hostState._pendingPool = [];
 }
 
 // =========================================================
-// HOST — Pool helpers (FIX #1 & #2)
+// HOST — Pool helpers
 // =========================================================
-
-// Firebase menyimpan array sebagai object {"0":"d01","1":"d02",...}.
-// Normalkan ke array id valid.
 function poolIdsFromSettings(settings) {
   const raw = settings?.pool;
   if (!raw) return [];
   let ids;
-  if (Array.isArray(raw))        ids = raw;
-  else if (typeof raw === 'object') ids = Object.values(raw);   // ⬅️ WAJIB
-  else                           return [];
+  if (Array.isArray(raw))              ids = raw;
+  else if (typeof raw === 'object')    ids = Object.values(raw);   // Firebase object → array
+  else                                 return [];
   const seen = new Set();
   return ids.filter(id => {
     if (typeof id !== 'string' || seen.has(id)) return false;
@@ -329,7 +303,6 @@ function poolIdsFromSettings(settings) {
   });
 }
 
-// Muat pool host dari Firebase settings; fallback ke seluruh KANJI.
 async function loadPoolFromSettings(code) {
   if (!code) throw new Error('loadPoolFromSettings: code kosong');
 
@@ -341,82 +314,84 @@ async function loadPoolFromSettings(code) {
   hostState.settings = settings;
 
   let ids = poolIdsFromSettings(settings);
-
   if (ids.length === 0) {
-    console.warn('[host] pool kosong / tidak valid — fallback ke seluruh KANJI');
+    console.warn('[host] pool kosong — fallback ke seluruh KANJI');
     ids = KANJI.map(k => k.id);
   }
 
   hostState.pool = ids;
-
   const poolSet = new Set(ids);
-  hostState.used = new Set(
-    [...(hostState.used || [])].filter(id => poolSet.has(id))
-  );
-
-  console.info(`[host] pool siap: ${ids.length} kanji, terpakai: ${hostState.used.size}`);
+  hostState.used = new Set([...(hostState.used || [])].filter(id => poolSet.has(id)));
+  console.info(`[host] pool siap: ${ids.length} kanji`);
   return ids;
 }
 
 // =========================================================
-// HOST — Setup: book list + pool selection
+// HOST — Setup: render book list (SYNC, dipanggil sebelum auth)
 // =========================================================
 function hostRenderBookList() {
   const el = document.getElementById('bookList');
-  if (!el) return;
+  if (!el) { console.error('[host] #bookList tidak ditemukan'); return; }
 
-  el.innerHTML = Object.entries(STRUCTURE).map(([book, chapters]) => {
-    const chaptersHtml = chapters.map(ch => `
-      <label class="chapter-label">
-        <input type="checkbox" name="chapter"
-               value="${escHtml(book)}::${escHtml(ch)}" checked>
-        ${escHtml(ch)}
-      </label>
-    `).join('');
+  if (!STRUCTURE || Object.keys(STRUCTURE).length === 0) {
+    console.error('[host] STRUCTURE kosong — data.js bermasalah');
+    el.innerHTML = '<p class="hint" style="color:#b71c1c">Data kanji tidak tersedia.</p>';
+    return;
+  }
 
-    return `
-      <div class="book-item" data-book="${escHtml(book)}">
-        <label class="book-label">
-          <input type="checkbox" class="book-check" checked>
-          ${escHtml(book)}
+  try {
+    el.innerHTML = Object.entries(STRUCTURE).map(([book, chapters]) => {
+      const chaptersHtml = chapters.map(ch => `
+        <label class="chapter-label">
+          <input type="checkbox" name="chapter"
+                 value="${escHtml(book)}::${escHtml(ch)}" checked>
+          ${escHtml(ch)}
         </label>
-        <div class="chapter-list">${chaptersHtml}</div>
-      </div>
-    `;
-  }).join('');
+      `).join('');
+      return `
+        <div class="book-item" data-book="${escHtml(book)}">
+          <label class="book-label">
+            <input type="checkbox" class="book-check" checked>
+            ${escHtml(book)}
+          </label>
+          <div class="chapter-list">${chaptersHtml}</div>
+        </div>
+      `;
+    }).join('');
 
-  // Book-level checkbox → toggle all its chapters
-  el.querySelectorAll('.book-check').forEach(cb => {
-    cb.addEventListener('change', () => {
-      const item = cb.closest('.book-item');
-      item.querySelectorAll('.chapter-label input').forEach(cc => {
-        cc.checked = cb.checked;
+    el.querySelectorAll('.book-check').forEach(cb => {
+      cb.addEventListener('change', () => {
+        cb.closest('.book-item')
+          .querySelectorAll('.chapter-label input')
+          .forEach(cc => { cc.checked = cb.checked; });
+        hostUpdatePool();
       });
-      hostUpdatePool();
     });
-  });
 
-  // Chapter-level checkbox → sync book indeterminate state
-  el.querySelectorAll('.chapter-label input').forEach(cb => {
-    cb.addEventListener('change', () => {
-      const item = cb.closest('.book-item');
-      const all = item.querySelectorAll('.chapter-label input');
-      const checked = item.querySelectorAll('.chapter-label input:checked');
-      const bookCheck = item.querySelector('.book-check');
-      if (bookCheck) {
-        bookCheck.checked = all.length === checked.length;
-        bookCheck.indeterminate = checked.length > 0 && checked.length < all.length;
-      }
-      hostUpdatePool();
+    el.querySelectorAll('.chapter-label input').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const item = cb.closest('.book-item');
+        const all = item.querySelectorAll('.chapter-label input');
+        const checked = item.querySelectorAll('.chapter-label input:checked');
+        const bookCheck = item.querySelector('.book-check');
+        if (bookCheck) {
+          bookCheck.checked = all.length === checked.length;
+          bookCheck.indeterminate = checked.length > 0 && checked.length < all.length;
+        }
+        hostUpdatePool();
+      });
     });
-  });
 
-  hostUpdatePool();
+    console.info('[host] book list dirender:', Object.keys(STRUCTURE).length, 'buku');
+    hostUpdatePool();
+  } catch (e) {
+    console.error('[host] render book list gagal:', e);
+    el.innerHTML = `<p class="hint" style="color:#b71c1c">Error: ${escHtml(e.message || e)}</p>`;
+  }
 }
 
 function hostUpdatePool() {
   const checked = [...document.querySelectorAll('#bookList .chapter-label input:checked')];
-  // Pakai prefixed chapters saja (buildPool mendukung format "Book::Chapter")
   const pool = buildPool([], checked.map(c => c.value));
   hostState._pendingPool = pool.map(k => k.id);
 
@@ -425,6 +400,8 @@ function hostUpdatePool() {
 
   const btnCreate = document.getElementById('btnCreateRoom');
   if (btnCreate) btnCreate.disabled = pool.length < MIN_POOL;
+
+  console.info('[host] pool update:', pool.length, 'kanji terpilih');
 }
 
 // =========================================================
@@ -438,7 +415,6 @@ async function hostCreateRoom(poolIds, maxPlayers = 8) {
     throw new Error(`Pilih minimal ${MIN_POOL} kanji.`);
   }
 
-  // Cari kode room kosong
   let code = null;
   for (let i = 0; i < 12; i++) {
     const candidate = genRoomCode();
@@ -447,7 +423,6 @@ async function hostCreateRoom(poolIds, maxPlayers = 8) {
   }
   if (!code) throw new Error('Gagal membuat kode room. Coba lagi.');
 
-  // Satu set atomic — validasi rule melihat final state konsisten
   await set(ref(db, `rooms/${code}`), {
     meta: {
       hostUid: myUid,
@@ -456,23 +431,16 @@ async function hostCreateRoom(poolIds, maxPlayers = 8) {
       maxPlayers: Math.max(2, Math.min(MAX_PLAYERS, Number(maxPlayers) || 8)),
       status: 'lobby',
     },
-    settings: {
-      pool: poolIds.slice(),
-    },
+    settings: { pool: poolIds.slice() },
     players: {
       [myUid]: {
-        name: 'Wasit',
-        score: 0,
-        isHost: true,
-        online: true,
-        joinedAt: Date.now(),
+        name: 'Wasit', score: 0, isHost: true, online: true, joinedAt: Date.now(),
       },
     },
   });
 
   onDisconnect(ref(db, `rooms/${code}/players/${myUid}/online`)).set(false);
 
-  // Update state
   hostState.code = code;
   hostState.uid = myUid;
   hostState.pool = poolIds.slice();
@@ -483,17 +451,16 @@ async function hostCreateRoom(poolIds, maxPlayers = 8) {
   hostState.finished = false;
   hostState.settings = { pool: poolIds.slice() };
 
-  // Setup watchers
   hostWatchPlayers();
   hostWatchMeta();
   hostWatchFlags();
 
-  // Isi & tampilkan roomInfo (untuk screen setup, kalau ada)
   const roomInfoEl = document.getElementById('roomInfo');
   const roomCodeEl = document.getElementById('roomCode');
   if (roomInfoEl) roomInfoEl.hidden = false;
   if (roomCodeEl) roomCodeEl.textContent = code;
 
+  console.info('[host] room dibuat:', code, '—', poolIds.length, 'kanji di pool');
   hostShowLobby();
 }
 
@@ -506,7 +473,6 @@ function hostWatchPlayers() {
     const players = snap.val() || {};
     hostState.playersCache = players;
 
-    // Lobby list (only non-host players)
     const listEl = document.getElementById('hostPlayerList');
     if (listEl) {
       const nonHost = Object.entries(players).filter(([_, p]) => !p.isHost);
@@ -521,22 +487,17 @@ function hostWatchPlayers() {
       });
     }
 
-    // Counts
     const countEl = document.getElementById('hostPlayerCount');
-    if (countEl) {
-      countEl.textContent = Object.values(players).filter(p => !p.isHost).length;
-    }
+    if (countEl) countEl.textContent = Object.values(players).filter(p => !p.isHost).length;
     const maxEl = document.getElementById('hostMaxPlayers');
     if (maxEl) maxEl.textContent = hostState.maxPlayers;
 
-    // Enable/disable Start
     const btnStart = document.getElementById('btnStartGame');
     if (btnStart) {
       const nonHost = Object.values(players).filter(p => !p.isHost).length;
       btnStart.disabled = (nonHost < 1) || (hostState.metaStatus !== 'lobby');
     }
 
-    // Score display during game
     if (hostState.metaStatus === 'playing' || hostState.metaStatus === 'finished') {
       hostRenderScores();
     }
@@ -548,7 +509,6 @@ function hostWatchMeta() {
   hostState.unsubMeta = onValue(metaRef, (snap) => {
     const meta = snap.val();
     if (!meta) {
-      // Room dibubarkan (jarang terjadi untuk host sendiri, tapi jaga-jaga)
       toast('Room tidak tersedia.');
       hostCleanup();
       location.href = 'index.html';
@@ -557,15 +517,11 @@ function hostWatchMeta() {
     hostState.metaStatus = meta.status;
 
     if (meta.status === 'playing') {
-      // Pastikan picker sudah tampil (untuk reconnect)
       if (!hostState.pool.length) {
         loadPoolFromSettings(hostState.code).then(() => {
-          if (hostState.currentScreen !== 'screen-host-game') {
-            hostShowGame();
-          } else {
-            hostRenderPicker();
-          }
-        }).catch(err => console.warn('[host] reload pool on meta:', err));
+          if (hostState.currentScreen !== 'screen-host-game') hostShowGame();
+          else hostRenderPicker();
+        }).catch(err => console.warn('[host] reload pool:', err));
       }
     } else if (meta.status === 'finished') {
       hostShowResult();
@@ -578,14 +534,8 @@ function hostWatchRound() {
   hostState.unsubRound = onValue(roundRef, (snap) => {
     const round = snap.val();
     hostState.currentRound = round;
-
-    if (!round) {
-      hostRenderRemainTag(null);
-      return;
-    }
-
+    if (!round) { hostRenderRemainTag(null); return; }
     hostRenderRemainTag(round.remaining);
-
     if (round.winner && !round.processed && !hostState.processedRounds.has(round.number)) {
       hostProcessWinner(round);
     }
@@ -632,9 +582,6 @@ function hostShowResult() {
   hostRenderResult();
 }
 
-// =========================================================
-// HOST — Render game-specific
-// =========================================================
 function hostRenderPrompt(card) {
   const el = document.getElementById('hostMeaning');
   if (!el) return;
@@ -654,14 +601,15 @@ function hostRenderScores() {
   renderScores(el, hostState.playersCache, hostState.uid, hostState.flags);
 }
 
-// FIX #3: Render picker dengan class .pick-card + event delegation
 function hostRenderPicker() {
   const el = document.getElementById('kanjiPicker');
-  if (!el) return;
+  if (!el) { console.error('[host] #kanjiPicker tidak ditemukan'); return; }
 
   const pool = hostState.pool || [];
   const used = hostState.used || new Set();
   const available = pool.filter(id => !used.has(id));
+
+  console.info('[host] render picker:', available.length, '/', pool.length, 'kanji tersedia');
 
   if (available.length === 0) {
     el.innerHTML = '<p class="hint">Tidak ada kanji tersisa. Klik Akhiri untuk selesai.</p>';
@@ -689,18 +637,14 @@ function hostRenderPicker() {
 }
 
 // =========================================================
-// HOST — Lifecycle: Start Game & Round
+// HOST — Lifecycle
 // =========================================================
 async function hostStartGame() {
   if (!hostState.code) return;
 
   const nonHost = Object.values(hostState.playersCache || {}).filter(p => !p.isHost).length;
-  if (nonHost < 1) {
-    toast('Butuh minimal 1 pemain untuk memulai.');
-    return;
-  }
+  if (nonHost < 1) { toast('Butuh minimal 1 pemain untuk memulai.'); return; }
 
-  // FIX #1 & #2: Load pool DULU, baru render
   try {
     await loadPoolFromSettings(hostState.code);
   } catch (e) {
@@ -709,7 +653,6 @@ async function hostStartGame() {
     return;
   }
 
-  // Reset round state
   hostState.used = new Set();
   hostState.roundNumber = 0;
   hostState.processedRounds = new Set();
@@ -718,8 +661,7 @@ async function hostStartGame() {
 
   try {
     await update(ref(db, `rooms/${hostState.code}/meta`), {
-      status: 'playing',
-      startedAt: Date.now(),
+      status: 'playing', startedAt: Date.now(),
     });
   } catch (e) {
     console.error(e);
@@ -728,25 +670,15 @@ async function hostStartGame() {
   }
   hostState.metaStatus = 'playing';
 
-  // Attach round watcher sekarang
   hostWatchRound();
-
   hostShowGame();
 }
 
-// FIX #4: hostPickTarget menambah ke `used` dan re-render picker
 async function hostPickTarget(id) {
   if (!hostState.code) return;
-  if (!hostState.pool.includes(id)) {
-    toast('Kanji tidak ada di pool!');
-    return;
-  }
-  if (hostState.used.has(id)) {
-    toast('Kanji sudah dipakai.');
-    return;
-  }
+  if (!hostState.pool.includes(id)) { toast('Kanji tidak ada di pool!'); return; }
+  if (hostState.used.has(id)) { toast('Kanji sudah dipakai.'); return; }
 
-  // Kalau ada ronde aktif yang belum selesai, tolak untuk hindari race
   const cur = hostState.currentRound;
   if (cur && !cur.processed && !cur.expired && !cur.winner) {
     toast('Selesaikan ronde berjalan dulu.');
@@ -776,8 +708,7 @@ async function hostPickTarget(id) {
 
   try {
     await update(ref(db, `rooms/${hostState.code}`), {
-      targetId: id,
-      currentRound: round,
+      targetId: id, currentRound: round,
     });
   } catch (e) {
     console.error(e);
@@ -795,11 +726,11 @@ async function hostPickTarget(id) {
   if (statusEl) statusEl.textContent = 'Ronde berjalan — menunggu pemenang…';
 
   if (hostState.roundTimer) clearTimeout(hostState.roundTimer);
-  hostState.roundTimer = setTimeout(() => hostTimeoutRound(), ROUND_TIMEOUT_MS);
+  hostState.roundTimer = setTimeout(hostTimeoutRound, ROUND_TIMEOUT_MS);
 }
 
 async function hostProcessWinner(round) {
-  if (!round || !round.winner || !round.winner.uid) return;
+  if (!round?.winner?.uid) return;
   if (hostState.processedRounds.has(round.number)) return;
   hostState.processedRounds.add(round.number);
 
@@ -809,30 +740,21 @@ async function hostProcessWinner(round) {
   const scoreRef = ref(db, `rooms/${hostState.code}/players/${winnerUid}/score`);
   try {
     await runTransaction(scoreRef, (cur) => (typeof cur === 'number' ? cur : 0) + 1);
-  } catch (e) {
-    console.warn('[host] score tx failed:', e);
-  }
+  } catch (e) { console.warn('[host] score tx:', e); }
 
   try {
     await update(ref(db, `rooms/${hostState.code}/currentRound`), {
-      processed: true,
-      remaining: 0,
+      processed: true, remaining: 0,
     });
-  } catch (e) {
-    console.warn('[host] mark processed failed:', e);
-  }
+  } catch (e) { console.warn('[host] mark processed:', e); }
 
   const winnerName = hostState.playersCache[winnerUid]?.name || '?';
   toast(`🎉 ${winnerName} mendapat 1 poin!`);
-
   const statusEl = document.getElementById('hostStatus');
   if (statusEl) statusEl.textContent = `Pemenang: ${winnerName}. Pilih kanji berikutnya.`;
 
-  // Kalau pool habis, akhiri permainan
   const remaining = hostState.pool.filter(x => !hostState.used.has(x));
-  if (remaining.length === 0) {
-    setTimeout(() => hostFinishGame(), NEXT_ROUND_DELAY);
-  }
+  if (remaining.length === 0) setTimeout(hostFinishGame, NEXT_ROUND_DELAY);
 }
 
 async function hostTimeoutRound() {
@@ -844,35 +766,24 @@ async function hostTimeoutRound() {
 
   try {
     await update(ref(db, `rooms/${hostState.code}/currentRound`), {
-      expired: true,
-      processed: true,
-      remaining: 0,
+      expired: true, processed: true, remaining: 0,
     });
-  } catch (e) {
-    console.warn('[host] timeout update failed:', e);
-  }
+  } catch (e) { console.warn('[host] timeout:', e); }
 
   toast('⏱ Waktu habis!');
   const statusEl = document.getElementById('hostStatus');
   if (statusEl) statusEl.textContent = 'Waktu habis. Pilih kanji berikutnya.';
 
   const remaining = hostState.pool.filter(x => !hostState.used.has(x));
-  if (remaining.length === 0) {
-    setTimeout(() => hostFinishGame(), NEXT_ROUND_DELAY);
-  }
+  if (remaining.length === 0) setTimeout(hostFinishGame, NEXT_ROUND_DELAY);
 }
 
-// =========================================================
-// HOST — Result / lifecycle
-// =========================================================
 function hostRenderResult() {
   const el = document.getElementById('hostResultList');
   if (!el) return;
-
   const list = Object.entries(hostState.playersCache || {})
     .filter(([_, p]) => !p.isHost)
     .sort((a, b) => (Number(b[1].score) || 0) - (Number(a[1].score) || 0));
-
   el.innerHTML = list.map(([uid, p], i) => {
     const score = Number(p.score) || 0;
     const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
@@ -881,8 +792,7 @@ function hostRenderResult() {
         <span class="rank">${medal}</span>
         <span class="name">${escHtml(p.name || '?')}</span>
         <span class="pts ${score < 0 ? 'negative' : ''}">${score}</span>
-      </div>
-    `;
+      </div>`;
   }).join('');
 }
 
@@ -890,19 +800,15 @@ async function hostFinishGame() {
   if (!hostState.code) return;
   hostState.finished = true;
   if (hostState.roundTimer) { clearTimeout(hostState.roundTimer); hostState.roundTimer = null; }
-
   try {
     await update(ref(db, `rooms/${hostState.code}/meta`), { status: 'finished' });
-  } catch (e) {
-    console.warn('[host] finish failed:', e);
-  }
+  } catch (e) { console.warn('[host] finish:', e); }
   hostState.metaStatus = 'finished';
   hostShowResult();
 }
 
 async function hostPlayAgain() {
   if (!hostState.code) return;
-
   hostState.used = new Set();
   hostState.roundNumber = 0;
   hostState.processedRounds = new Set();
@@ -923,7 +829,7 @@ async function hostPlayAgain() {
   try {
     await update(ref(db, `rooms/${hostState.code}`), updates);
   } catch (e) {
-    console.warn('[host] playAgain failed:', e);
+    console.warn('[host] playAgain:', e);
     toast('Gagal reset permainan.');
     return;
   }
@@ -935,9 +841,7 @@ async function hostDisband() {
   const code = hostState.code;
   hostCleanup();
   if (code) {
-    try { await remove(ref(db, `rooms/${code}`)); } catch (e) {
-      console.warn('[host] disband failed:', e);
-    }
+    try { await remove(ref(db, `rooms/${code}`)); } catch (e) { console.warn(e); }
   }
   location.href = 'index.html';
 }
@@ -948,14 +852,9 @@ async function hostKickPlayer(uid) {
   try {
     await remove(ref(db, `rooms/${hostState.code}/players/${uid}`));
     toast('Pemain dikeluarkan.');
-  } catch (e) {
-    toast('Gagal mengeluarkan: ' + (e.message || ''));
-  }
+  } catch (e) { toast('Gagal: ' + (e.message || '')); }
 }
 
-// =========================================================
-// HOST — Review dialog
-// =========================================================
 function hostShowReview() {
   const dialog = document.getElementById('reviewDialog');
   const content = document.getElementById('reviewContent');
@@ -963,7 +862,6 @@ function hostShowReview() {
 
   const flags = hostState.flags || {};
   const entries = Object.entries(flags);
-
   if (entries.length === 0) {
     content.innerHTML = '<p class="hint">Belum ada aktivitas mencurigakan.</p>';
   } else {
@@ -981,17 +879,15 @@ function hostShowReview() {
       </div>`;
     }).join('');
   }
-
   dialog.showModal();
 }
 
 // =========================================================
-// PLAYER — Join
+// PLAYER — Join / watchers / screens
 // =========================================================
 async function playerJoinRoom(rawCode, rawName) {
   const code = String(rawCode || '').trim().toUpperCase();
   const name = String(rawName || '').trim().slice(0, 16);
-
   if (code.length !== 4) throw new Error('Kode room harus 4 huruf.');
   if (!name) throw new Error('Nama harus diisi.');
 
@@ -1007,7 +903,6 @@ async function playerJoinRoom(rawCode, rawName) {
     if (meta.status !== 'lobby') throw new Error('Permainan sudah berjalan.');
     const nonHostCount = Object.values(players).filter(p => !p.isHost).length;
     if (nonHostCount >= (meta.maxPlayers || MAX_PLAYERS)) throw new Error('Room penuh.');
-
     await set(ref(db, `rooms/${code}/players/${myUid}`), {
       name, score: 0, isHost: false, online: true, joinedAt: Date.now(),
     });
@@ -1026,7 +921,14 @@ async function playerJoinRoom(rawCode, rawName) {
   playerState.clickedThisRound = false;
 
   saveSession();
-  wirePlayerControls();
+
+  const btnLeave = document.getElementById('btnLeaveGame');
+  if (btnLeave && !btnLeave._wired) {
+    btnLeave._wired = true;
+    btnLeave.addEventListener('click', () => {
+      if (confirm('Keluar dari permainan?')) playerLeave();
+    });
+  }
 
   if (!playerState.antiCheat) {
     playerState.antiCheat = createAntiCheat({
@@ -1043,94 +945,53 @@ async function playerJoinRoom(rawCode, rawName) {
   playerWatchRoom();
 }
 
-function wirePlayerControls() {
-  const btnLeave = document.getElementById('btnLeaveGame');
-  if (btnLeave && !btnLeave._wired) {
-    btnLeave._wired = true;
-    btnLeave.addEventListener('click', () => {
-      if (confirm('Keluar dari permainan?')) playerLeave();
-    });
-  }
-}
-
-// =========================================================
-// PLAYER — Watchers
-// =========================================================
 function playerWatchRoom() {
   playerState.unsub.forEach(fn => { try { fn(); } catch {} });
   playerState.unsub = [];
   const code = playerState.code;
 
-  const metaRef = ref(db, `rooms/${code}/meta`);
-  playerState.unsub.push(onValue(metaRef, (snap) => {
+  playerState.unsub.push(onValue(ref(db, `rooms/${code}/meta`), (snap) => {
     const meta = snap.val();
-    if (!meta) {
-      toast('Room dibubarkan.');
-      playerLeave();
-      return;
-    }
+    if (!meta) { toast('Room dibubarkan.'); playerLeave(); return; }
     playerState.metaStatus = meta.status;
-
-    if (meta.status === 'finished') {
-      playerShowResult();
-    } else if (meta.status === 'lobby') {
+    if (meta.status === 'finished') playerShowResult();
+    else if (meta.status === 'lobby') {
       if (playerState.currentScreen !== 'screen-multi-join') playerShowLobby();
     }
-    // 'playing' → tunggu currentRound muncul di watcher ronde
   }));
 
-  const playersRef = ref(db, `rooms/${code}/players`);
-  playerState.unsub.push(onValue(playersRef, (snap) => {
+  playerState.unsub.push(onValue(ref(db, `rooms/${code}/players`), (snap) => {
     const players = snap.val() || {};
     playerState.players = players;
-    if (!players[myUid]) {
-      toast('Anda dikeluarkan dari room.');
-      playerLeave();
-      return;
-    }
+    if (!players[myUid]) { toast('Anda dikeluarkan.'); playerLeave(); return; }
     if (playerState.currentScreen === 'screen-multi-lobby') playerRenderLobby();
     if (playerState.currentScreen === 'screen-game') playerRenderScores();
     if (playerState.currentScreen === 'screen-result') playerRenderResult();
   }));
 
-  const roundRef = ref(db, `rooms/${code}/currentRound`);
-  playerState.unsub.push(onValue(roundRef, (snap) => {
+  playerState.unsub.push(onValue(ref(db, `rooms/${code}/currentRound`), (snap) => {
     const round = snap.val();
     playerState.currentRound = round;
-
     if (round) {
-      if (playerState.metaStatus === 'finished') {
-        playerShowResult();
-      } else {
-        playerShowGame();
-        playerRenderGame();
-      }
-    } else {
-      // Round null → kembali ke lobby bila sebelumnya di game
-      if (playerState.currentScreen === 'screen-game') playerShowLobby();
+      if (playerState.metaStatus === 'finished') playerShowResult();
+      else { playerShowGame(); playerRenderGame(); }
+    } else if (playerState.currentScreen === 'screen-game') {
+      playerShowLobby();
     }
   }));
 
   playerShowLobby();
 }
 
-// =========================================================
-// PLAYER — Screens
-// =========================================================
-function playerShowScreen(id) {
-  showScreen(id);
-  playerState.currentScreen = id;
-}
+function playerShowScreen(id) { showScreen(id); playerState.currentScreen = id; }
 
 function playerShowJoinForm({ prefilledRoom = null } = {}) {
   playerShowScreen('screen-multi-join');
   const codeInput = document.getElementById('joinCode');
   const nameInput = document.getElementById('joinName');
   const btnJoin   = document.getElementById('btnJoin');
-
   if (codeInput && prefilledRoom) codeInput.value = prefilledRoom.toUpperCase();
   if (nameInput) nameInput.value = playerState.name || '';
-
   if (btnJoin && !btnJoin._wired) {
     btnJoin._wired = true;
     btnJoin.addEventListener('click', async () => {
@@ -1148,30 +1009,18 @@ function playerShowJoinForm({ prefilledRoom = null } = {}) {
   }
 }
 
-function playerShowLobby() {
-  playerShowScreen('screen-multi-lobby');
-  playerRenderLobby();
-}
-
+function playerShowLobby() { playerShowScreen('screen-multi-lobby'); playerRenderLobby(); }
 function playerShowGame() {
   if (playerState.currentScreen !== 'screen-game') {
     playerShowScreen('screen-game');
     playerState.lastCardsKey = null;
   }
 }
+function playerShowResult() { playerShowScreen('screen-result'); playerRenderResult(); }
 
-function playerShowResult() {
-  playerShowScreen('screen-result');
-  playerRenderResult();
-}
-
-// =========================================================
-// PLAYER — Rendering
-// =========================================================
 function playerRenderLobby() {
   const roomEl = document.getElementById('lobbyCode');
   if (roomEl) roomEl.textContent = playerState.code || '----';
-
   const listEl = document.getElementById('lobbyPlayers');
   const countEl = document.getElementById('lobbyCount');
   const entries = Object.entries(playerState.players || {});
@@ -1225,11 +1074,9 @@ function playerRenderScores() {
 function playerRenderResult() {
   const el = document.getElementById('resultList');
   if (!el) return;
-
   const list = Object.entries(playerState.players || {})
     .filter(([_, p]) => !p.isHost)
     .sort((a, b) => (Number(b[1].score) || 0) - (Number(a[1].score) || 0));
-
   el.innerHTML = list.map(([uid, p], i) => {
     const score = Number(p.score) || 0;
     const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
@@ -1238,14 +1085,10 @@ function playerRenderResult() {
         <span class="rank">${medal}</span>
         <span class="name">${escHtml(p.name || '?')}</span>
         <span class="pts ${score < 0 ? 'negative' : ''}">${score}</span>
-      </div>
-    `;
+      </div>`;
   }).join('');
 }
 
-// =========================================================
-// PLAYER — Card click & winner
-// =========================================================
 function wireFieldClicks() {
   const fieldEl = document.getElementById('field') || document.getElementById('cardField');
   if (!fieldEl) return;
@@ -1275,15 +1118,12 @@ async function handleCardClick(btn) {
 
   playerState.clickedThisRound = true;
   try {
-    const winnerRef = ref(db, `rooms/${playerState.code}/currentRound/winner`);
-    const result = await runTransaction(winnerRef, (cur) => {
-      if (cur && cur.uid) return cur;
-      return { uid: myUid, cardId, round: round.number };
-    });
+    const result = await runTransaction(
+      ref(db, `rooms/${playerState.code}/currentRound/winner`),
+      (cur) => (cur && cur.uid) ? cur : { uid: myUid, cardId, round: round.number }
+    );
     if (result.committed) btn.classList.add('correct');
-  } catch (e) {
-    console.warn('winner write failed:', e);
-  }
+  } catch (e) { console.warn('winner write failed:', e); }
 }
 
 function highlightWinnerCard(cardId) {
@@ -1295,52 +1135,45 @@ function highlightWinnerCard(cardId) {
   });
 }
 
-// =========================================================
-// PLAYER — Leave
-// =========================================================
 async function playerLeave() {
   if (playerState.antiCheat) { playerState.antiCheat.stop(); playerState.antiCheat = null; }
   playerState.unsub.forEach(fn => { try { fn(); } catch {} });
   playerState.unsub = [];
-
   const code = playerState.code;
   const uid  = playerState.uid;
-  playerState.code = null;
-  playerState.uid = null;
-  playerState.currentRound = null;
-  playerState.players = {};
-  playerState.lastCardsKey = null;
-  playerState.lastRoundNumber = 0;
-  playerState.clickedThisRound = false;
-  playerState.currentScreen = null;
-
+  playerState.code = null; playerState.uid = null;
+  playerState.currentRound = null; playerState.players = {};
+  playerState.lastCardsKey = null; playerState.lastRoundNumber = 0;
+  playerState.clickedThisRound = false; playerState.currentScreen = null;
   clearSession();
-
-  if (code && uid) {
-    try { await remove(ref(db, `rooms/${code}/players/${uid}`)); } catch {}
-  }
-
+  if (code && uid) { try { await remove(ref(db, `rooms/${code}/players/${uid}`)); } catch {} }
   location.href = 'play.html?mode=multi';
 }
 
 // =========================================================
-// INIT — Host
+// INIT — Host (render DULU, baru auth)
 // =========================================================
 export async function initHost() {
-  await signIn();
-  myUid = auth.currentUser.uid;
-
+  // 1. Render setup UI SEGERA — sebelum auth, agar selalu tampil
   hostRenderBookList();
+  hostWireSetupControls();
 
-  const btnAll      = document.getElementById('btnAll');
-  const btnNone     = document.getElementById('btnNone');
-  const btnCreate   = document.getElementById('btnCreateRoom');
-  const maxInput    = document.getElementById('maxPlayersInput');
-  const btnStart    = document.getElementById('btnStartGame');
-  const btnFinish   = document.getElementById('btnFinishGame');
-  const btnReview   = document.getElementById('btnReviewFlags');
-  const btnPlayAgain= document.getElementById('btnPlayAgain');
-  const btnCopyCode = document.getElementById('btnCopyCode');
+  // 2. Auth Firebase (tidak memblokir UI)
+  try {
+    await signIn();
+    myUid = auth.currentUser.uid;
+    console.info('[host] auth OK, uid:', myUid);
+  } catch (e) {
+    console.error('[host] auth gagal:', e);
+    toast('Gagal autentikasi. Periksa koneksi & Firebase.');
+  }
+}
+
+function hostWireSetupControls() {
+  const btnAll    = document.getElementById('btnAll');
+  const btnNone   = document.getElementById('btnNone');
+  const btnCreate = document.getElementById('btnCreateRoom');
+  const maxInput  = document.getElementById('maxPlayersInput');
 
   if (btnAll) btnAll.onclick = () => {
     document.querySelectorAll('#bookList input[type="checkbox"]').forEach(c => { c.checked = true; });
@@ -1348,11 +1181,8 @@ export async function initHost() {
   };
   if (btnNone) btnNone.onclick = () => {
     document.querySelectorAll('#bookList input[type="checkbox"]').forEach(c => {
-      if (c.classList.contains('book-check')) {
-        c.checked = false; c.indeterminate = false;
-      } else {
-        c.checked = false;
-      }
+      c.checked = false;
+      if (c.classList.contains('book-check')) c.indeterminate = false;
     });
     hostUpdatePool();
   };
@@ -1369,11 +1199,18 @@ export async function initHost() {
       btnCreate.disabled = false;
     }
   };
-  if (btnStart)   btnStart.onclick   = hostStartGame;
-  if (btnFinish)  btnFinish.onclick  = hostFinishGame;
-  if (btnReview)  btnReview.onclick  = hostShowReview;
-  if (btnPlayAgain) btnPlayAgain.onclick = hostPlayAgain;
-  if (btnCopyCode) btnCopyCode.onclick = () => {
+
+  const btnStart   = document.getElementById('btnStartGame');
+  const btnFinish  = document.getElementById('btnFinishGame');
+  const btnReview  = document.getElementById('btnReviewFlags');
+  const btnAgain   = document.getElementById('btnPlayAgain');
+  const btnCopy    = document.getElementById('btnCopyCode');
+
+  if (btnStart)  btnStart.onclick  = hostStartGame;
+  if (btnFinish) btnFinish.onclick = hostFinishGame;
+  if (btnReview) btnReview.onclick = hostShowReview;
+  if (btnAgain)  btnAgain.onclick  = hostPlayAgain;
+  if (btnCopy) btnCopy.onclick = () => {
     const txt = (document.getElementById('roomCode')?.textContent || '').trim();
     if (!txt || txt === '----') return;
     navigator.clipboard?.writeText(txt).then(
@@ -1411,6 +1248,5 @@ export async function initPlayer({ prefilledRoom = null } = {}) {
       clearSession();
     }
   }
-
   playerShowJoinForm({ prefilledRoom });
 }
