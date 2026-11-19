@@ -111,8 +111,11 @@
         },
 
         "picks": {
+          ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
+
           "$uid": {
             ".read": "auth != null && (auth.uid === $uid || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val())",
+
             "$roundNumber": {
               ".write": "auth != null && auth.uid === $uid && !data.exists() && root.child('rooms').child($code).child('meta').child('status').val() === 'playing'",
               ".validate": "newData.hasChildren(['cardId','correct','at']) && newData.child('cardId').isString() && newData.child('correct').isBoolean() && newData.child('at').isNumber()"
