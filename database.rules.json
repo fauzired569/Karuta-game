@@ -57,8 +57,8 @@
               ".validate": "newData.isBoolean()"
             },
             "score": {
-              ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
-              ".validate": "newData.isNumber() && newData.val() >= 0"
+              ".write": "auth != null && (auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val() || (auth.uid === $uid && data.isNumber() && newData.isNumber() && newData.val() < data.val()))",
+              ".validate": "newData.isNumber() && newData.val() % 1 === 0"
             },
             "isHost": {
               ".validate": "newData.isBoolean()"
@@ -114,12 +114,12 @@
           ".read": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
           ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val()",
 
-          "$uid": {
-            ".read": "auth != null && (auth.uid === $uid || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val())",
+          "$flagUid": {
+            ".read": "auth != null && (auth.uid === $flagUid || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val())",
 
             "$flagId": {
-              ".write": "auth != null && ((auth.uid === $uid && !data.exists() && newData.hasChildren(['type','round'])) || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val())",
-              ".validate": "newData.child('type').isString() && newData.child('type').val().length >= 1 && newData.child('type').val().length <= 64 && newData.child('round').isNumber()"
+              ".write": "auth != null && ((auth.uid === $flagUid && !data.exists() && newData.hasChildren(['type','round'])) || auth.uid === root.child('rooms').child($code).child('meta').child('hostUid').val())",
+              ".validate": "newData.hasChildren(['type','round']) && newData.child('type').isString() && newData.child('type').val().length >= 1 && newData.child('type').val().length <= 64 && newData.child('round').isNumber()"
             }
           }
         }
